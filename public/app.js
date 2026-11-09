@@ -89,7 +89,7 @@
     $('#lobby').hidden = name !== 'lobby';
     $('#game').hidden = name !== 'game';
     if (name !== 'game') {
-      for (const id of ['#over', '#paused', '#history', '#menu']) $(id).hidden = true;
+      for (const id of ['#over', '#paused', '#history', '#help', '#menu']) $(id).hidden = true;
       ui.overShown = false;
       ui.historyOpen = false;
       Sound.heartbeat(false);
@@ -136,9 +136,26 @@
     es.onmessage = ev => { $('#banner').hidden = true; onState(JSON.parse(ev.data)); };
     es.addEventListener('emoji', ev => onEmoji(JSON.parse(ev.data)));
     es.onerror = () => {
-      if (es && es.readyState === EventSource.CLOSED) forget('That table is no longer available. Create a new one or join with another code.');
-      else $('#banner').hidden = false;
+      if (ui.leaving) return;               // the tab is closing or reloading: keep the saved seat
+      $('#banner').hidden = false;
+      if (es && es.readyState === EventSource.CLOSED) verifySession();
     };
+  }
+
+  // The stream gave up. Only forget the seat when the server says the table or the
+  // seat is really gone; on a network hiccup keep it and try again shortly.
+  async function verifySession() {
+    const mine = session;
+    if (!mine) return;
+    try {
+      const r = await fetch(`/api/rooms/${mine.code}/history?token=${encodeURIComponent(mine.token)}`, { cache: 'no-store' });
+      if (session !== mine) return;
+      if (r.status === 401 || r.status === 404) {
+        forget('That table is no longer available. It may have restarted. Create a new one or join with another code.');
+        return;
+      }
+    } catch (e) { /* offline: keep trying below */ }
+    setTimeout(() => { if (session === mine && (!es || es.readyState !== EventSource.OPEN)) connect(); }, 2000);
   }
 
   function forget(message) {
@@ -158,6 +175,7 @@
   async function enter(fn) {
     const name = $('#name').value.trim();
     store.set('poker.name', name);
+    store.set('poker.pin', $('#pin').value);
     const buttons = [$('#join-btn'), $('#create-btn')];
     buttons.forEach(b => { b.disabled = true; });
     try {
@@ -166,6 +184,7 @@
       store.set('poker.session', session);
       history.replaceState(null, '', '#' + r.code);
       connect();
+      if (r.rejoined) toast('Welcome back, ' + name);
     } catch (e) {
       toast(e.message);
       syncHomeButtons();
@@ -176,8 +195,9 @@
 
   function syncHomeButtons() {
     const name = $('#name').value.trim();
-    $('#join-btn').disabled = !(name && $('#code').value.length === 4);
-    $('#create-btn').disabled = !name;
+    const pinOk = /^\d{4}$/.test($('#pin').value);
+    $('#join-btn').disabled = !(name && pinOk && $('#code').value.length === 4);
+    $('#create-btn').disabled = !(name && pinOk);
   }
 
   let homeWired = false;
@@ -185,24 +205,28 @@
     const name = $('#name');
     const code = $('#code');
     if (!name.value) name.value = store.get('poker.name') || '';
+    const pin = $('#pin');
+    if (!pin.value) pin.value = store.get('poker.pin') || '';
     const hash = location.hash.replace('#', '').toUpperCase().slice(0, 4);
     if (/^[A-Z0-9]{4}$/.test(hash)) code.value = hash;
     if (!homeWired) {
       homeWired = true;
       code.addEventListener('input', () => { code.value = code.value.toUpperCase().replace(/[^A-Z0-9]/g, ''); });
       name.addEventListener('input', syncHomeButtons);
+      pin.addEventListener('input', () => { pin.value = pin.value.replace(/\D/g, '').slice(0, 4); syncHomeButtons(); });
       code.addEventListener('input', syncHomeButtons);
       $('#home-form').addEventListener('submit', e => {
         e.preventDefault();
         if ($('#join-btn').disabled) return;
-        enter(() => api(`/api/rooms/${code.value}/join`, { name: name.value }));
+        enter(() => api(`/api/rooms/${code.value}/join`, { name: name.value, pin: pin.value }));
       });
-      $('#create-btn').addEventListener('click', () => enter(() => api('/api/rooms', { name: name.value })));
+      $('#create-btn').addEventListener('click', () => enter(() => api('/api/rooms', { name: name.value, pin: pin.value })));
       $('#install-link').addEventListener('click', runInstall);
     }
+    $('#home-help').replaceChildren(helpBlock());
     syncHomeButtons();
     syncInstallLink();
-    (name.value ? code : name).focus();
+    (!name.value ? name : !pin.value ? pin : code).focus();
   }
 
   // ---------- install on the home screen ----------
@@ -337,11 +361,47 @@
               h('span', { class: 'pname', text: p.name + (p.id === s.you ? ' (you)' : '') }),
               p.id === s.hostId ? h('span', { class: 'host', text: 'Host' }) : null))),
           rules,
+          helpBlock(),
           isHost
             ? h('button', { class: 'btn primary', disabled: s.players.length < 2, onclick: () => post('start'),
                 text: s.players.length < 2 ? 'Waiting for players to join' : 'Start game' })
             : h('p', { class: 'wait', text: 'Waiting for the host to start the game.' }))));
   }
+
+  // ---------- how the app works ----------
+
+  const HELP = [
+    ['Joining', 'One person creates a table and shares the invite link or the 4-letter code. Everyone else joins with their name, a 4-digit PIN of their choice, and the code.'],
+    ['Coming back', 'Lost your seat, or switched device? Join the same table again with the same name and PIN and you are back at your seat with your chips.'],
+    ['The game', 'Everyone starts with the same stack. Blinds go up on a timer, shown at the top. The last player with chips wins.'],
+    ['Your turn', 'Fold, check or call, or raise with the slider and the quick buttons. You have a turn timer. The time bank button adds one extra turn when you need it, a few times per game.'],
+    ['Check / fold', 'Tap the check/fold toggle before your turn and it plays for you: it checks if that is free, and folds if not.'],
+    ['All in', 'When nobody can bet any more, the cards are dealt one by one with each player\'s win chance shown.'],
+    ['After a hand', 'Show one or both of your cards if you like. When everyone else folded you can rabbit hunt to see the cards that would have come.'],
+    ['Emojis', 'The smiley button at the bottom left sends an emoji that pops up at your seat.'],
+    ['Menu', 'The ... button at the top has the hand history, sound on or off, the invite link and, for the host, pause. The host can also change the rules in the lobby before the game starts.'],
+    ['Install', 'On a phone you can add Poker night to your home screen and open it like an app.'],
+  ];
+
+  function helpList() {
+    return h('dl', { class: 'help-list' }, HELP.flatMap(([title, text]) => [h('dt', { text: title }), h('dd', { text })]));
+  }
+  function helpBlock() {
+    const d = h('details', { class: 'help' }, h('summary', { text: 'How the app works' }), helpList());
+    d.open = !!ui.helpOpen;
+    d.addEventListener('toggle', () => { ui.helpOpen = d.open; });
+    return d;
+  }
+  function openHelp() {
+    $('#help').replaceChildren(
+      h('div', { class: 'sheet wood', role: 'dialog', 'aria-label': 'How the app works' },
+        h('div', { class: 'sheet-head' },
+          h('h2', { text: 'How the app works' }),
+          h('button', { class: 'btn small', text: 'Close', onclick: closeHelp })),
+        helpList()));
+    $('#help').hidden = false;
+  }
+  function closeHelp() { $('#help').hidden = true; }
 
   // ---------- top bar and menu ----------
 
@@ -370,6 +430,7 @@
       ['Hand history', openHistory],
       [`Sound: ${Sound.isEnabled() ? 'on' : 'off'}`, () => { Sound.setEnabled(!Sound.isEnabled()); Sound.chip(); }],
       ['Share invite link', invite],
+      ['How the app works', openHelp],
     ];
     if (s.hostId === s.you && s.phase !== 'finished') items.push([s.paused ? 'Resume game' : 'Pause game', () => post(s.paused ? 'resume' : 'pause')]);
     if (canInstall()) items.push(['Put on home screen', runInstall]);
@@ -388,6 +449,7 @@
     $('#menu').hidden = true;
     closeEmojis();
     if (ui.historyOpen) closeHistory();
+    closeHelp();
   });
 
   // ---------- cards and chips ----------
@@ -884,6 +946,14 @@
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* not available, that is fine */ }); });
   }
+
+  window.addEventListener('pagehide', () => { ui.leaving = true; });
+  window.addEventListener('pageshow', () => { ui.leaving = false; });
+
+  // Waking a tab (phone unlocked, switched back): make sure the live stream is up.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && session && (!es || es.readyState !== EventSource.OPEN)) connect();
+  });
 
   const saved = store.get('poker.session');
   const hashCode = location.hash.replace('#', '').toUpperCase().slice(0, 4);

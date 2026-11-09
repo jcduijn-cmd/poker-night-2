@@ -86,12 +86,12 @@ async function withServer(opts, fn) {
 
 // Create a table with a host and N-1 friends, returns everything needed to play.
 async function setup(port, names) {
-  const created = await request(port, 'POST', '/api/rooms', { name: names[0] });
+  const created = await request(port, 'POST', '/api/rooms', { name: names[0], pin: '1234' });
   assert.strictEqual(created.status, 200);
   const code = created.json.code;
   const players = [{ name: names[0], ...created.json }];
   for (const name of names.slice(1)) {
-    const j = await request(port, 'POST', `/api/rooms/${code}/join`, { name });
+    const j = await request(port, 'POST', `/api/rooms/${code}/join`, { name, pin: '1234' });
     assert.strictEqual(j.status, 200, JSON.stringify(j.json));
     players.push({ name, ...j.json });
   }
@@ -109,7 +109,7 @@ test('create a table, join with a code, see the lobby live', async () => {
     assert.strictEqual(state.you, players[0].playerId);
     assert.deepStrictEqual(state.players.map(p => p.name), ['Jan', 'Piet']);
     // joining with lower-case code works too
-    const again = await request(port, 'POST', `/api/rooms/${code.toLowerCase()}/join`, { name: 'Klaas' });
+    const again = await request(port, 'POST', `/api/rooms/${code.toLowerCase()}/join`, { name: 'Klaas', pin: '1234' });
     assert.strictEqual(again.status, 200);
     await s.waitFor(st => st.players.length === 3);
   });
@@ -118,12 +118,35 @@ test('create a table, join with a code, see the lobby live', async () => {
 test('rejects duplicate names, empty names, unknown tables and bad tokens', async () => {
   await withServer({}, async (port) => {
     const { code } = await setup(port, ['Jan']);
-    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'jan' })).status, 400);
-    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: '   ' })).status, 400);
-    assert.strictEqual((await request(port, 'POST', `/api/rooms/ZZZZ/join`, { name: 'X' })).status, 404);
+    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'jan', pin: '9999' })).status, 403);
+    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: '   ', pin: '1234' })).status, 400);
+    assert.strictEqual((await request(port, 'POST', `/api/rooms/ZZZZ/join`, { name: 'X', pin: '1234' })).status, 404);
     assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/start`, { token: 'nope' })).status, 401);
     assert.strictEqual((await request(port, 'GET', `/api/rooms/${code}/events?token=nope`)).status, 401);
     assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, undefined)).status, 400);
+  });
+});
+
+test('PIN: same name + PIN takes your seat back, wrong PIN is refused and locks after 5 tries', async () => {
+  await withServer({}, async (port, open) => {
+    const { code, players } = await setup(port, ['Jan', 'Piet']);
+    const old = open(code, players[1].token);
+    await old.waitFor(st => st.players.length === 2);
+    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Piet' })).status, 400); // PIN required
+    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Piet', pin: 'abcd' })).status, 400);
+    const back = await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'piet', pin: '1234' });
+    assert.strictEqual(back.status, 200);
+    assert.strictEqual(back.json.rejoined, true);
+    assert.strictEqual(back.json.playerId, players[1].playerId);
+    assert.notStrictEqual(back.json.token, players[1].token);
+    // the old session no longer works, the new one does
+    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/start`, { token: players[1].token })).status, 401);
+    const fresh = open(code, back.json.token);
+    const st = await fresh.waitFor(x => x.you === players[1].playerId);
+    assert.strictEqual(st.players.length, 2);
+    // brute force protection
+    for (let i = 0; i < 5; i++) assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Piet', pin: '0000' })).status, 403);
+    assert.strictEqual((await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Piet', pin: '1234' })).status, 429);
   });
 });
 
@@ -138,7 +161,7 @@ test('only the host can start, and it needs two players (late joining off)', asy
     assert.strictEqual(tooFew.status, 400);
     const ok = await request(port, 'POST', `/api/rooms/${code}/start`, { token: host.token });
     assert.strictEqual(ok.status, 200);
-    const late = await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Late' });
+    const late = await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Late', pin: '1234' });
     assert.strictEqual(late.status, 400);
   });
 });
@@ -369,7 +392,7 @@ test('late joining through the API: allowed by default after the start, dealt in
     const s = open(code, players[0].token);
     await post(port, code, 'start', players[0].token);
     await s.waitFor(x => x.phase === 'preflop');
-    const late = await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Klaas' });
+    const late = await request(port, 'POST', `/api/rooms/${code}/join`, { name: 'Klaas', pin: '1234' });
     assert.strictEqual(late.status, 200);
     const joined = await s.waitFor(x => x.players.length === 3);
     const klaas = joined.players.find(p => p.name === 'Klaas');

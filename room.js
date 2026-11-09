@@ -48,6 +48,7 @@ class Room {
 
     this.hostId = null;
     this.tokens = new Map();   // secret token -> player id
+    this.pins = new Map();     // player id -> salted PIN hash (to take your seat back)
     this.clients = new Map();  // player id -> Set of open event streams
     this.timeouts = new Map(); // player id -> consecutive turn timeouts
     this.timeBank = new Map(); // player id -> extra turns left
@@ -76,21 +77,54 @@ class Room {
 
   // ---------- people ----------
 
-  join(name) {
+  join(name, pin) {
     const clean = String(name || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 20);
     if (!clean) throw new RoomError('Please enter a name');
-    if (this.game.players.some(p => p.name.toLowerCase() === clean.toLowerCase())) {
-      throw new RoomError('That name is already taken at this table');
-    }
+    const code = String(pin === undefined || pin === null ? '' : pin);
+    if (!/^\d{4}$/.test(code)) throw new RoomError('Choose a 4-digit PIN');
+    const existing = this.game.players.find(p => p.name.toLowerCase() === clean.toLowerCase());
+    if (existing) return this.reclaim(existing.id, code);
     const id = 'p' + crypto.randomBytes(4).toString('hex');
     const token = crypto.randomBytes(16).toString('hex');
     this.wrap(() => this.game.addPlayer(id, clean));
     if (!this.hostId) this.hostId = id;
+    const salt = crypto.randomBytes(8).toString('hex');
+    this.pins.set(id, { salt, hash: this.hashPin(code, salt), fails: 0, lockedUntil: 0 });
     this.tokens.set(token, id);
     this.timeBank.set(id, this.settings.timeBank);
     this.touch();
     this.broadcast();
-    return { id, token };
+    return { id, token, rejoined: false };
+  }
+
+  hashPin(pin, salt) {
+    return crypto.scryptSync(pin, salt, 16).toString('hex');
+  }
+
+  // Someone joins with the name of a player who is already at the table: with the
+  // right PIN they get that seat back (any older sessions of that player stop working).
+  reclaim(id, code) {
+    const rec = this.pins.get(id);
+    const now = Date.now();
+    if (!rec) throw new RoomError('That name is already taken at this table');
+    if (rec.lockedUntil > now) {
+      throw new RoomError('Too many wrong PINs. Try again in ' + Math.ceil((rec.lockedUntil - now) / 1000) + ' seconds.', 429);
+    }
+    const ok = crypto.timingSafeEqual(Buffer.from(this.hashPin(code, rec.salt), 'hex'), Buffer.from(rec.hash, 'hex'));
+    if (!ok) {
+      rec.fails += 1;
+      if (rec.fails >= 5) { rec.fails = 0; rec.lockedUntil = now + 60000; }
+      throw new RoomError('That name is taken. If it is you, enter the PIN you chose; otherwise pick another name.', 403);
+    }
+    rec.fails = 0;
+    for (const [t, pid] of this.tokens) if (pid === id) this.tokens.delete(t);
+    const set = this.clients.get(id);
+    if (set) { for (const res of set) { try { res.end(); } catch (e) { /* gone */ } } this.clients.delete(id); }
+    const token = crypto.randomBytes(16).toString('hex');
+    this.tokens.set(token, id);
+    this.touch();
+    this.broadcast();
+    return { id, token, rejoined: true };
   }
 
   auth(token) {

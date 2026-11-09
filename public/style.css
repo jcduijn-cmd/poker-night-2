@@ -701,3 +701,13 @@ input[type=range]::-moz-range-thumb { width: 22px; height: 22px; border-radius: 
   .code { font-size: 3rem; }
   .tb b { font-size: .95rem; }
 }
+
+#home-form label { display: block; margin-top: 14px; }
+#home-form .hint { margin: 8px 0 0; }
+
+.help { margin-top: 14px; border: 1px solid rgba(201, 162, 75, .4); border-radius: 10px; background: rgba(28, 15, 8, .35); }
+.help summary { cursor: pointer; padding: 12px 14px; font-weight: 600; }
+.help .help-list { margin: 0; padding: 0 14px 12px; }
+.help-list { display: grid; gap: 2px; margin: 12px 0 0; }
+.help-list dt { margin-top: 10px; font-weight: 700; color: var(--gold, #efd48a); }
+.help-list dd { margin: 2px 0 0; line-height: 1.45; }

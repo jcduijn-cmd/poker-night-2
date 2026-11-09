@@ -30,9 +30,14 @@
           <label>Your name
             <input id="name" maxlength="20" autocomplete="nickname" required>
           </label>
+          <label>PIN (4 digits)
+            <input id="pin" class="code-input" maxlength="4" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="1234" required>
+          </label>
+          <p class="hint">Pick any PIN. If you get disconnected, join again with the same name and PIN to get your seat back.</p>
           <label>Table code
             <input id="code" class="code-input" maxlength="4" placeholder="K7QM" autocapitalize="characters" spellcheck="false">
           </label>
+          <div id="home-help"></div>
           <div class="btn-col">
             <button type="submit" id="join-btn" class="btn primary" disabled>Join table</button>
             <button type="button" id="create-btn" class="btn" disabled>Create a new table</button>
@@ -64,6 +69,7 @@
 
   <div id="menu" class="menu wood" role="menu" hidden></div>
   <div id="history" class="overlay sheet-wrap" hidden></div>
+  <div id="help" class="overlay sheet-wrap" hidden></div>
   <div id="paused" class="overlay" hidden></div>
   <div id="over" class="overlay" hidden></div>
 

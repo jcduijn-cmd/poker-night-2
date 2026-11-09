@@ -2,8 +2,8 @@
 // HTTP server: a small JSON API + live updates over Server-Sent Events,
 // plus static files from ./public. Zero dependencies.
 //
-//   POST /api/rooms                  {name}                 create a table (you become host)
-//   POST /api/rooms/:code/join       {name}                 join a table
+//   POST /api/rooms                  {name, pin}            create a table (you become host)
+//   POST /api/rooms/:code/join       {name, pin}            join (same name + PIN = take your seat back) a table
 //   GET  /api/rooms/:code/events?token=...                  live game state stream (SSE)
 //   POST /api/rooms/:code/start      {token}                host starts the game
 //   POST /api/rooms/:code/action     {token, action, amount}  fold | check | call | raise | allin
@@ -121,9 +121,9 @@ function createApp(opts = {}) {
         const body = await readJson(req);
         if (rooms.size >= MAX_ROOMS) throw new RoomError('Server is busy, try again later', 503);
         const room = new Room(newCode(), roomOpts);
-        const me = room.join(body.name);
+        const me = room.join(body.name, body.pin);
         rooms.set(room.code, room);
-        return sendJson(res, 200, { code: room.code, playerId: me.id, token: me.token });
+        return sendJson(res, 200, { code: room.code, playerId: me.id, token: me.token, rejoined: false });
       }
 
       const m = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{4})\/(join|events|history|start|action|leave|sitin|settings|show|rabbit|pause|resume|timebank|emoji|preaction)$/);
@@ -142,8 +142,8 @@ function createApp(opts = {}) {
 
       const body = await readJson(req);
       if (what === 'join') {
-        const me = room.join(body.name);
-        return sendJson(res, 200, { code: room.code, playerId: me.id, token: me.token });
+        const me = room.join(body.name, body.pin);
+        return sendJson(res, 200, { code: room.code, playerId: me.id, token: me.token, rejoined: me.rejoined });
       }
 
       const id = room.auth(body.token);
