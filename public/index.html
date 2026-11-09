@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#1c0f08">
+  <title>Poker night</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Bevan&family=Libre+Franklin:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="banner" class="banner" role="status" hidden>Connection lost. Reconnecting…</div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <main id="home" class="screen" hidden>
+    <div class="plaque wood">
+      <div class="felt-card">
+        <h1>Poker night</h1>
+        <p class="lede">A Texas Hold'em tournament for you and your friends. Chips only, no real money.</p>
+        <form id="home-form" autocomplete="off">
+          <label>Your name
+            <input id="name" maxlength="20" autocomplete="nickname" required>
+          </label>
+          <label>Table code
+            <input id="code" class="code-input" maxlength="4" placeholder="K7QM" autocapitalize="characters" spellcheck="false">
+          </label>
+          <div class="btn-col">
+            <button type="submit" id="join-btn" class="btn primary" disabled>Join table</button>
+            <button type="button" id="create-btn" class="btn" disabled>Create a new table</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </main>
+
+  <main id="lobby" class="screen" hidden></main>
+
+  <div id="game" class="game" hidden>
+    <header class="topbar wood" id="topbar"></header>
+    <section class="table-area">
+      <div class="table wood" id="table">
+        <div class="felt"></div>
+        <div class="center" id="center"></div>
+        <div id="seats"></div>
+      </div>
+    </section>
+    <footer class="actions wood" id="actions"></footer>
+  </div>
+
+  <div id="over" class="overlay" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
