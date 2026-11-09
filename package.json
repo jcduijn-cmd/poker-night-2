@@ -1,0 +1,14 @@
+{
+  "name": "poker-night",
+  "version": "1.0.0",
+  "description": "Texas Hold'em tournament for friends. Chips only.",
+  "private": true,
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node engine.test.js && node game.test.js && node server.test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
