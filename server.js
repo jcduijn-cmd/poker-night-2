@@ -9,6 +9,15 @@
 //   POST /api/rooms/:code/action     {token, action, amount}  fold | check | call | raise | allin
 //   POST /api/rooms/:code/leave      {token}                sit out
 //   POST /api/rooms/:code/sitin      {token}                come back
+//   POST /api/rooms/:code/settings   {token, settings}      host: change the rules (lobby only)
+//   POST /api/rooms/:code/pause      {token}                host: pause / resume (blinds clock stops too)
+//   POST /api/rooms/:code/resume     {token}
+//   POST /api/rooms/:code/show       {token, which}         after a hand: left | right | both
+//   POST /api/rooms/:code/rabbit     {token}                after a fold-out: reveal the next cards
+//   POST /api/rooms/:code/timebank   {token}                +1 turn of thinking time
+//   POST /api/rooms/:code/preaction  {token, on}            check / fold when your turn comes
+//   POST /api/rooms/:code/emoji      {token, emoji}         one of the 20 table emojis
+//   GET  /api/rooms/:code/history?token=...                 hand history for this player
 //   GET  /healthz
 
 const http = require('http');
@@ -29,7 +38,10 @@ const MAX_ROOMS = 200;
 
 function createApp(opts = {}) {
   const rooms = new Map();
-  const roomOpts = { turnMs: opts.turnMs, handPauseMs: opts.handPauseMs, game: opts.game };
+  const roomOpts = {
+    turnMs: opts.turnMs, handPauseMs: opts.handPauseMs, game: opts.game,
+    settings: opts.settings, runoutSpeed: opts.runoutSpeed,
+  };
 
   function newCode() {
     for (;;) {
@@ -114,13 +126,18 @@ function createApp(opts = {}) {
         return sendJson(res, 200, { code: room.code, playerId: me.id, token: me.token });
       }
 
-      const m = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{4})\/(join|events|start|action|leave|sitin)$/);
+      const m = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{4})\/(join|events|history|start|action|leave|sitin|settings|show|rabbit|pause|resume|timebank|emoji|preaction)$/);
       if (!m) throw new RoomError('Not found', 404);
       const room = rooms.get(m[1].toUpperCase());
       if (!room) throw new RoomError('Table not found. Check the code.', 404);
       const what = m[2];
 
       if (what === 'events' && req.method === 'GET') return openEvents(req, res, room, url);
+      if (what === 'history' && req.method === 'GET') {
+        const hid = room.auth(url.searchParams.get('token'));
+        if (!hid) throw new RoomError('Invalid token', 401);
+        return sendJson(res, 200, { hands: room.historyFor(hid) });
+      }
       if (req.method !== 'POST') throw new RoomError('Method not allowed', 405);
 
       const body = await readJson(req);
@@ -135,6 +152,14 @@ function createApp(opts = {}) {
       else if (what === 'action') room.action(id, String(body.action), body.amount);
       else if (what === 'leave') room.leave(id);
       else if (what === 'sitin') room.sitIn(id);
+      else if (what === 'settings') room.setSettings(id, body.settings);
+      else if (what === 'show') room.show(id, String(body.which));
+      else if (what === 'rabbit') room.rabbit(id);
+      else if (what === 'pause') room.pause(id);
+      else if (what === 'resume') room.resume(id);
+      else if (what === 'timebank') room.useTimeBank(id);
+      else if (what === 'emoji') room.emoji(id, String(body.emoji));
+      else if (what === 'preaction') room.setPreAction(id, body.on === true);
       return sendJson(res, 200, { ok: true });
     } catch (e) {
       if (e instanceof RoomError) return sendJson(res, e.status, { error: e.message });
@@ -173,6 +198,7 @@ if (require.main === module) {
   const port = Number(process.env.PORT) || 3000;
   const turnMs = (Number(process.env.TURN_SECONDS) || 30) * 1000;
   const handPauseMs = (Number(process.env.HAND_PAUSE_SECONDS) || 6) * 1000;
-  const { server } = createApp({ turnMs, handPauseMs });
+  const runoutSpeed = Number(process.env.RUNOUT_SPEED) || 1; // only for testing: 0.05 makes all-in run-outs 20x faster
+  const { server } = createApp({ turnMs, handPauseMs, runoutSpeed });
   server.listen(port, '0.0.0.0', () => console.log('Poker server running on http://localhost:' + port));
 }

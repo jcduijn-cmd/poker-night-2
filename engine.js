@@ -120,9 +120,74 @@ function findWinners(entries) {
   return winners;
 }
 
+// ---------- win percentages ----------
+
+const COMBOS_7 = [...combinations([0, 1, 2, 3, 4, 5, 6], 5)];
+
+// Score of the best five out of exactly seven cards (no allocation per combination).
+function bestScore7(cards) {
+  let best = -1;
+  const five = [null, null, null, null, null];
+  for (const c of COMBOS_7) {
+    five[0] = cards[c[0]]; five[1] = cards[c[1]]; five[2] = cards[c[2]];
+    five[3] = cards[c[3]]; five[4] = cards[c[4]];
+    const s = evaluate5(five);
+    if (s > best) best = s;
+  }
+  return best;
+}
+
+// Chance (0-100) that each player wins, given their hole cards and the board so far.
+// entries: [{ id, hole: [card, card] }]. Ties split equally.
+// With one or two cards still to come every possibility is counted exactly;
+// before the flop it samples random boards, capped so it always takes a few milliseconds.
+function equity(entries, board, maxEvals = 250000) {
+  const known = new Set();
+  for (const e of entries) for (const c of e.hole) known.add(cardToString(c));
+  for (const c of board) known.add(cardToString(c));
+  const unseen = newDeck().filter(c => !known.has(cardToString(c)));
+  const need = 5 - board.length;
+  const n = entries.length;
+  const wins = new Array(n).fill(0);
+  let total = 0;
+
+  const score = (extra) => {
+    const full = board.concat(extra);
+    let top = -1;
+    let winners = [];
+    for (let i = 0; i < n; i++) {
+      const s = bestScore7(entries[i].hole.concat(full));
+      if (s > top) { top = s; winners = [i]; } else if (s === top) winners.push(i);
+    }
+    for (const w of winners) wins[w] += 1 / winners.length;
+    total++;
+  };
+
+  const evalCost = 21 * n;
+  const exactCount = need === 0 ? 1 : need === 1 ? unseen.length : need === 2 ? (unseen.length * (unseen.length - 1)) / 2 : Infinity;
+  if (need === 0) score([]);
+  else if (exactCount * evalCost <= maxEvals) {
+    for (const extra of combinations(unseen, need)) score(extra);
+  } else {
+    const trials = Math.max(200, Math.floor(maxEvals / evalCost));
+    const pool = unseen.slice();
+    for (let t = 0; t < trials; t++) {
+      for (let i = 0; i < need; i++) {
+        const j = i + Math.floor(Math.random() * (pool.length - i));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+      score(pool.slice(0, need));
+    }
+  }
+  const out = {};
+  entries.forEach((e, i) => { out[e.id] = (wins[i] / total) * 100; });
+  return out;
+}
+
 module.exports = {
   SUITS, CATEGORY_NAMES,
   parseCard, parseCards, cardToString,
   newDeck, shuffle,
   evaluate5, bestHand, categoryOf, findWinners,
+  equity,
 };

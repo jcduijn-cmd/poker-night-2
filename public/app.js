@@ -10,12 +10,18 @@
     'Straight': 'a straight', 'Flush': 'a flush', 'Full House': 'a full house',
     'Four of a Kind': 'four of a kind', 'Straight Flush': 'a straight flush',
   };
+  // Same 20 as the server accepts.
+  const EMOJIS = [
+    '👍', '👏', '😂', '😎', '😏', '🤔', '😬', '😱', '😭', '😡',
+    '🤯', '🙏', '🍀', '🔥', '💰', '🦈', '🐟', '🥶', '💀', '🫡',
+  ];
 
   const $ = sel => document.querySelector(sel);
   const landscape = window.matchMedia('(orientation: landscape)'); // same query the CSS uses for the wide table
   const fmt = n => Number(n).toLocaleString('en-US');
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
   const r5 = v => Math.round(v / 5) * 5;
+  const cardKey = c => c.r + c.s;
   const ordinal = n => {
     const s = ['th', 'st', 'nd', 'rd'];
     const v = n % 100;
@@ -25,6 +31,11 @@
     const t = Math.max(0, Math.ceil(ms / 1000));
     return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0');
   };
+  const duration = ms => {
+    const m = Math.round(ms / 60000);
+    return m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ' ' + (m % 60) + ' min' : ''}`;
+  };
+  const signed = n => (n > 0 ? '+' : n < 0 ? '−' : '') + fmt(Math.abs(n));
 
   // Tiny DOM builder. Text always goes in as text, never as HTML.
   function h(tag, props, ...kids) {
@@ -50,11 +61,17 @@
     del(k) { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } },
   };
 
+  const Sound = window.Sound || new Proxy({}, { get: () => () => false }); // the table still works without sound
+
   let session = null;     // { code, token, playerId }
   let es = null;          // EventSource
   let state = null;       // latest state from the server
   let skew = 0;           // server clock minus our clock
-  const ui = { footerKey: '', rendered: new Set(), handNumber: 0, wasMyTurn: false, overShown: false, busy: false };
+  const ui = {
+    footerKey: '', rendered: new Set(), stagger: 0, handNumber: 0, wasMyTurn: false, overShown: false,
+    busy: false, lobbyKey: '', seatPos: {}, studsKey: '', historyOpen: false, historyCount: -1,
+    lastSecs: null, installEvent: null, pausedKey: '',
+  };
 
   // ---------- small helpers ----------
 
@@ -71,7 +88,12 @@
     $('#home').hidden = name !== 'home';
     $('#lobby').hidden = name !== 'lobby';
     $('#game').hidden = name !== 'game';
-    if (name !== 'game') { $('#over').hidden = true; ui.overShown = false; }
+    if (name !== 'game') {
+      for (const id of ['#over', '#paused', '#history', '#menu']) $(id).hidden = true;
+      ui.overShown = false;
+      ui.historyOpen = false;
+      Sound.heartbeat(false);
+    }
   }
 
   async function api(path, body) {
@@ -86,12 +108,12 @@
     return json;
   }
 
-  async function post(kind, extra) {
-    if (ui.busy) return;
-    ui.busy = true;
+  async function post(kind, extra, quiet) {
+    if (ui.busy && !quiet) return;
+    if (!quiet) ui.busy = true;
     try { await api(`/api/rooms/${session.code}/${kind}`, { token: session.token, ...extra }); }
-    catch (e) { toast(e.message); }
-    finally { ui.busy = false; }
+    catch (e) { if (!quiet) toast(e.message); }
+    finally { if (!quiet) ui.busy = false; }
   }
 
   async function invite() {
@@ -112,6 +134,7 @@
     es = new EventSource(`/api/rooms/${session.code}/events?token=${encodeURIComponent(session.token)}`);
     es.onopen = () => { $('#banner').hidden = true; };
     es.onmessage = ev => { $('#banner').hidden = true; onState(JSON.parse(ev.data)); };
+    es.addEventListener('emoji', ev => onEmoji(JSON.parse(ev.data)));
     es.onerror = () => {
       if (es && es.readyState === EventSource.CLOSED) forget('That table is no longer available. Create a new one or join with another code.');
       else $('#banner').hidden = false;
@@ -123,6 +146,7 @@
     store.del('poker.session');
     session = null;
     state = null;
+    ui.lobbyKey = ui.footerKey = '';
     history.replaceState(null, '', location.pathname);
     $('#banner').hidden = true;
     document.title = 'Poker night';
@@ -174,17 +198,42 @@
         enter(() => api(`/api/rooms/${code.value}/join`, { name: name.value }));
       });
       $('#create-btn').addEventListener('click', () => enter(() => api('/api/rooms', { name: name.value })));
+      $('#install-link').addEventListener('click', runInstall);
     }
     syncHomeButtons();
+    syncInstallLink();
     (name.value ? code : name).focus();
+  }
+
+  // ---------- install on the home screen ----------
+
+  const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true;
+  const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
+
+  window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); ui.installEvent = e; syncInstallLink(); });
+  window.addEventListener('appinstalled', () => { ui.installEvent = null; syncInstallLink(); });
+
+  function canInstall() { return !isStandalone() && (!!ui.installEvent || isIos()); }
+  function syncInstallLink() { $('#install-link').hidden = !canInstall(); }
+  async function runInstall() {
+    if (ui.installEvent) {
+      const ev = ui.installEvent;
+      ui.installEvent = null;
+      ev.prompt();
+      try { await ev.userChoice; } catch (e) { /* dismissed */ }
+      syncInstallLink();
+    } else if (isIos()) {
+      toast('Tap the Share button, then "Add to Home Screen".');
+    }
   }
 
   // ---------- state updates ----------
 
   function onState(s) {
     skew = s.serverTime - Date.now();
+    const before = state;
     state = s;
-    if (s.handNumber !== ui.handNumber) { ui.handNumber = s.handNumber; ui.rendered.clear(); }
+    if (s.handNumber !== ui.handNumber) { ui.handNumber = s.handNumber; ui.rendered.clear(); ui.footerKey = ''; }
 
     const myTurn = s.toAct === s.you;
     const touched = !navigator.userActivation || navigator.userActivation.hasBeenActive;
@@ -193,19 +242,89 @@
     document.title = myTurn ? 'Your turn: Poker night' : 'Poker night';
 
     if (s.phase === 'lobby') { showScreen('lobby'); renderLobby(s); return; }
+    soundsFor(before, s);
     showScreen('game');
+    if (before && before.phase === 'lobby' && s.seatsDrawn) toast('Seats were drawn at random');
+    ui.stagger = 0;
     renderTopbar(s);
     renderTable(s);
     renderActions(s);
+    renderPaused(s);
     if (s.phase === 'finished') renderOver(s);
+    if (ui.historyOpen && s.historyCount !== ui.historyCount) loadHistory();
     tick();
+  }
+
+  // Sounds follow changes between two states.
+  function soundsFor(prev, s) {
+    Sound.heartbeat(s.phase === 'runout' && !s.paused, s.board.length >= 4 ? 96 : s.board.length >= 3 ? 80 : 64);
+    if (!prev || prev.phase === 'lobby') return;
+    const me = s.you;
+    if (s.handNumber > prev.handNumber) { Sound.deal(); }
+    else if (s.handNumber === prev.handNumber) {
+      const pl = id => prev.players.find(p => p.id === id);
+      if (s.board.length > prev.board.length) Sound.flip(s.board.length - prev.board.length);
+      const betUp = s.players.some(p => pl(p.id) && p.bet > pl(p.id).bet);
+      const folded = s.players.some(p => pl(p.id) && p.folded && !pl(p.id).folded && pl(p.id).inHand);
+      if (betUp) Sound.chip();
+      if (folded) Sound.fold();
+      if (!betUp && !folded && prev.toAct && prev.toAct !== s.toAct && s.phase === prev.phase) Sound.check();
+      if (s.phase === 'runout' && prev.phase !== 'runout') Sound.allIn();
+      const over = p => p === 'handover' || p === 'finished';
+      if (over(s.phase) && !over(prev.phase) && s.result) {
+        if ((s.result.contested || {})[me] > 0) Sound.win(); else Sound.chip();
+      }
+    }
+    if (s.toAct === me && prev.toAct !== me) Sound.turn();
   }
 
   // ---------- lobby ----------
 
+  const dur = m => (m < 60 ? `${m} min` : `${Math.floor(m / 60)} h${m % 60 ? ' ' + (m % 60) + ' min' : ''}`);
+  const SETTING_FIELDS = [
+    ['startingStack', 'Starting stack', [2500, 5000, 10000, 12500, 20000, 25000, 50000], v => `${fmt(v)} chips`],
+    ['levelMinutes', 'Blinds go up every', [5, 10, 15, 20, 30, 45, 60], v => `${v} minutes`],
+    ['turnSeconds', 'Time per turn', [15, 20, 30, 45, 60, 90], v => `${v} seconds`],
+    ['timeBank', 'Time bank', [0, 1, 2, 3, 5], v => (v ? `${v} extra turn${v > 1 ? 's' : ''} each` : 'None')],
+    ['anteFromLevel', 'Antes', [0, 2, 3, 4, 5, 6, 8], v => (v ? `From level ${v}` : 'No antes')],
+    ['lateRegLevel', 'Late joining', [0, 2, 3, 4, 5, 6, 8], (v, st) => (v ? `Open through level ${v} (${dur(v * st.levelMinutes)})` : 'Not allowed')],
+  ];
+
   function renderLobby(s) {
     const isHost = s.hostId === s.you;
+    const key = JSON.stringify([s.players.map(p => [p.id, p.name, p.connected]), s.hostId, s.settings, s.you, s.blinds]);
+    if (key === ui.lobbyKey) return;
+    ui.lobbyKey = key;
+    const st = s.settings;
     const [sb, bb] = s.blinds;
+
+    let rules;
+    if (isHost) {
+      const collect = () => {
+        const out = {};
+        document.querySelectorAll('#lobby select[data-key]').forEach(sel => { out[sel.dataset.key] = Number(sel.value); });
+        return out;
+      };
+      rules = h('div', { class: 'settings' },
+        h('h3', { text: 'Table rules' }),
+        SETTING_FIELDS.map(([k, label, values, text]) =>
+          h('label', {}, label,
+            h('select', { 'data-key': k, onchange: () => post('settings', { settings: collect() }) },
+              values.map(v => h('option', { value: v, selected: st[k] === v, text: text(v, st) })))),
+        ),
+        h('p', { class: 'hint', text: `Blinds start at ${fmt(sb)}/${fmt(bb)}. Seats are drawn at random when you start.` }));
+    } else {
+      rules = h('div', { class: 'settings' },
+        h('h3', { text: 'Table rules' }),
+        h('ul', { class: 'rules-list' }, [
+          `${fmt(st.startingStack)} chips each`,
+          `Blinds start at ${fmt(sb)}/${fmt(bb)} and go up every ${st.levelMinutes} minutes`,
+          `${st.turnSeconds} seconds per turn, ${st.timeBank ? st.timeBank + ' extra turn' + (st.timeBank > 1 ? 's' : '') + ' of time bank' : 'no time bank'}`,
+          st.anteFromLevel ? `Antes from level ${st.anteFromLevel}` : 'No antes',
+          st.lateRegLevel ? `Late joining through level ${st.lateRegLevel}` : 'No late joining',
+        ].map(t => h('li', { text: t }))));
+    }
+
     $('#lobby').replaceChildren(
       h('div', { class: 'plaque wood' },
         h('div', { class: 'felt-card' },
@@ -217,15 +336,14 @@
               h('span', { class: 'dot' }),
               h('span', { class: 'pname', text: p.name + (p.id === s.you ? ' (you)' : '') }),
               p.id === s.hostId ? h('span', { class: 'host', text: 'Host' }) : null))),
-          h('p', { class: 'rules', text:
-            `Everyone starts with ${fmt(s.startingStack)} chips. Blinds start at ${fmt(sb)}/${fmt(bb)} and go up every ${s.levelMinutes} minutes. You get ${Math.round(s.turnMs / 1000)} seconds per turn.` }),
+          rules,
           isHost
             ? h('button', { class: 'btn primary', disabled: s.players.length < 2, onclick: () => post('start'),
                 text: s.players.length < 2 ? 'Waiting for players to join' : 'Start game' })
             : h('p', { class: 'wait', text: 'Waiting for the host to start the game.' }))));
   }
 
-  // ---------- top bar ----------
+  // ---------- top bar and menu ----------
 
   function renderTopbar(s) {
     const [sb, bb] = s.blinds;
@@ -234,24 +352,72 @@
       h('button', { class: 'tb', onclick: invite, title: 'Share invite link' },
         h('span', { class: 'tb-label', text: 'Table' }), h('b', { text: s.code })),
       h('div', { class: 'tb' },
-        h('span', { class: 'tb-label', text: `Blinds, level ${s.level}` }), h('b', { text: `${fmt(sb)} / ${fmt(bb)}` })),
+        h('span', { class: 'tb-label', text: `Blinds, level ${s.level}` }),
+        h('b', { text: `${fmt(sb)} / ${fmt(bb)}` }),
+        s.ante ? h('span', { class: 'tb-label', text: `Ante ${fmt(s.ante)}` }) : null),
       h('div', { class: 'tb right' },
         h('span', { class: 'tb-label', text: next ? `Next ${fmt(next[0])} / ${fmt(next[1])} in` : '' }),
-        h('b', { class: 'js-level-time', text: '' })));
+        h('b', { class: 'js-level-time', text: '' })),
+      h('button', { class: 'menu-btn', 'aria-label': 'Menu', 'aria-haspopup': 'menu', onclick: toggleMenu, text: '⋯' }));
   }
+
+  function toggleMenu(e) {
+    e.stopPropagation();
+    const m = $('#menu');
+    if (!m.hidden) { m.hidden = true; return; }
+    const s = state;
+    const items = [
+      ['Hand history', openHistory],
+      [`Sound: ${Sound.isEnabled() ? 'on' : 'off'}`, () => { Sound.setEnabled(!Sound.isEnabled()); Sound.chip(); }],
+      ['Share invite link', invite],
+    ];
+    if (s.hostId === s.you && s.phase !== 'finished') items.push([s.paused ? 'Resume game' : 'Pause game', () => post(s.paused ? 'resume' : 'pause')]);
+    if (canInstall()) items.push(['Put on home screen', runInstall]);
+    m.replaceChildren(...items.map(([label, fn]) =>
+      h('button', { class: 'menu-item', role: 'menuitem', text: label, onclick: () => { m.hidden = true; fn(); } })));
+    m.hidden = false;
+  }
+  document.addEventListener('click', e => {
+    const m = $('#menu');
+    if (!m.hidden && !m.contains(e.target)) m.hidden = true;
+    const p = $('#emoji-panel');
+    if (!p.hidden && !p.contains(e.target) && e.target !== $('#emoji-btn')) closeEmojis();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    $('#menu').hidden = true;
+    closeEmojis();
+    if (ui.historyOpen) closeHistory();
+  });
 
   // ---------- cards and chips ----------
 
-  function cardEl(c, key) {
+  // A card has two faces, so it can flip over when it first appears.
+  function cardEl(c, key, mode) {
     const red = c.s === 'h' || c.s === 'd';
     const rank = RANK_LABEL[c.r] || String(c.r);
-    const isNew = !ui.rendered.has(key);
-    ui.rendered.add(key);
-    return h('div', { class: 'card' + (red ? ' red' : '') + (isNew ? ' new' : ''), role: 'img', 'aria-label': `${rank} of ${SUIT_NAMES[c.s]}` },
-      h('span', { class: 'r', text: rank }),
-      h('span', { class: 's', text: SUITS[c.s] }),
-      h('span', { class: 'big', text: SUITS[c.s] }));
+    let isNew = false;
+    let delay = 0;
+    if (key) {
+      isNew = !ui.rendered.has(key);
+      ui.rendered.add(key);
+      if (isNew) delay = Math.min(ui.stagger++ * 0.12, 0.6);
+    }
+    return h('div', {
+      class: 'card' + (red ? ' red' : '') + (isNew ? ' new' : '') + (mode ? ' ' + mode : ''),
+      style: isNew ? `--d:${delay.toFixed(2)}s` : null,
+      role: 'img', 'aria-label': `${rank} of ${SUIT_NAMES[c.s]}`,
+    },
+      h('div', { class: 'flip' },
+        h('div', { class: 'face front' },
+          h('span', { class: 'r', text: rank }),
+          h('span', { class: 's', text: SUITS[c.s] }),
+          h('span', { class: 'big', text: SUITS[c.s] })),
+        h('div', { class: 'face back' })));
   }
+
+  const backEl = () => h('div', { class: 'card facedown', 'aria-label': 'Face-down card' },
+    h('div', { class: 'flip' }, h('div', { class: 'face back' })));
 
   function chipsEl(amount, bb) {
     const ratio = amount / bb;
@@ -276,6 +442,38 @@
     return { x: 50 + rx * Math.cos(t), y: 50 + ry * Math.sin(t) };
   }
 
+  // Brass studs around the padded rail. The ellipse differs between portrait and landscape.
+  function buildStuds() {
+    const key = landscape.matches ? 'l' : 'p';
+    if (ui.studsKey === key) return;
+    ui.studsKey = key;
+    const ratio = landscape.matches ? 1.7 : 0.78;
+    const rx = 45.6;
+    const ry = 50 - 4.4 * ratio;
+    const studs = [];
+    const count = 34;
+    for (let i = 0; i < count; i++) {
+      const t = (i / count) * Math.PI * 2;
+      studs.push(h('i', { style: `left:${(50 + rx * Math.cos(t)).toFixed(2)}%;top:${(50 + ry * Math.sin(t)).toFixed(2)}%` }));
+    }
+    $('#studs').replaceChildren(...studs);
+  }
+
+  // At a showdown: which cards made the winning hands.
+  function showdownInfo(s) {
+    const r = s.result;
+    if (!r || r.type !== 'showdown' || (s.phase !== 'handover' && s.phase !== 'finished')) return null;
+    const winners = new Set();
+    for (const pot of r.pots) if (pot.eligible.length > 1) pot.winners.forEach(id => winners.add(id));
+    const best = {};
+    const cards = new Set();
+    for (const hand of r.hands) {
+      best[hand.id] = new Set(hand.best.map(cardKey));
+      if (winners.has(hand.id)) hand.best.forEach(c => cards.add(cardKey(c)));
+    }
+    return { winners, best, cards };
+  }
+
   function resultFor(s, id) {
     const r = s.result;
     if (!r || (s.phase !== 'handover' && s.phase !== 'finished')) return {};
@@ -283,19 +481,22 @@
     return { hand, win: r.winnings[id] };
   }
 
-  function seatEl(p, pos, me, s) {
+  function seatEl(p, pos, me, s, sd) {
     const acting = s.toAct === p.id;
     const res = resultFor(s, p.id);
     const bb = s.blinds[1];
+    const eq = s.equity && s.equity[p.id] !== undefined ? s.equity[p.id] : null;
 
     let cards = [];
-    if (p.hole) cards = p.hole.map((c, k) => cardEl(c, `${s.handNumber}:${p.id}:${k}`));
-    else if (p.hasCards) cards = [h('div', { class: 'card back' }), h('div', { class: 'card back' })];
+    const modeFor = c => (sd ? (sd.winners.has(p.id) && sd.best[p.id].has(cardKey(c)) ? 'win' : 'dim') : null);
+    if (p.hole && p.hole.length) cards = p.hole.map((c, k) => (c ? cardEl(c, `${s.handNumber}:${p.id}:${k}`, modeFor(c)) : backEl()));
+    else if (p.hasCards) cards = [backEl(), backEl()];
 
     let status = null;
     if (p.busted) status = `Out, ${ordinal(p.place)}`;
     else if (p.sittingOut) status = 'Away';
     else if (p.folded && p.inHand) status = 'Folded';
+    else if (!p.inHand && s.phase !== 'handover' && s.phase !== 'finished') status = 'Next hand';
     else if (p.allIn && s.phase !== 'handover' && s.phase !== 'finished') status = 'All in';
 
     const cls = ['seat', me && 'me', acting && 'acting', p.folded && !p.busted && 'folded',
@@ -308,9 +509,10 @@
         h('div', { class: 'stack', text: fmt(p.stack) }),
         p.isDealer ? h('span', { class: 'puck', title: 'Dealer', text: 'D' }) : null,
         p.connected ? null : h('span', { class: 'off', title: 'Disconnected' })),
+      eq !== null ? h('div', { class: 'tag eq', text: eq + '%' }) : null,
       res.hand ? h('div', { class: 'tag', text: res.hand }) : null,
       res.win ? h('div', { class: 'tag win', text: '+' + fmt(res.win) }) : null,
-      status && !res.win ? h('div', { class: 'tag', text: status }) : null,
+      status && !res.win && eq === null ? h('div', { class: 'tag', text: status }) : null,
       acting ? h('div', { class: 'timer' }, h('i')) : null);
 
     let bet = null;
@@ -342,12 +544,20 @@
   }
 
   function renderTable(s) {
+    const table = $('#table');
     const players = rotate(s.players, s.you);
-    $('#table').classList.toggle('crowded', players.length > 6);
+    table.classList.toggle('crowded', players.length > 6);
+    table.classList.toggle('runout', s.phase === 'runout');
+    buildStuds();
+
+    const sd = showdownInfo(s);
     const seats = $('#seats');
     seats.replaceChildren();
+    ui.seatPos = {};
     players.forEach((p, i) => {
-      seats.append(...seatEl(p, seatPos(i, players.length), i === 0, s).filter(Boolean));
+      const pos = seatPos(i, players.length);
+      ui.seatPos[p.id] = pos;
+      seats.append(...seatEl(p, pos, i === 0, s, sd).filter(Boolean));
     });
 
     const over = s.phase === 'handover' || s.phase === 'finished';
@@ -358,10 +568,26 @@
       center.push(h('div', { class: 'pot' }, chipsEl(s.pot, s.blinds[1]), h('span', { text: `Pot ${fmt(s.pot)}` })));
       if (sides) center.push(h('div', { class: 'msg' }, h('div', { class: 'sub', text: sides })));
     }
-    center.push(h('div', { class: 'board' }, [0, 1, 2, 3, 4].map(i =>
-      s.board[i] ? cardEl(s.board[i], `${s.handNumber}:b${i}`) : h('div', { class: 'slot' }))));
+
+    const rabbit = s.result && s.result.rabbit ? s.result.rabbit.cards : null;
+    center.push(h('div', { class: 'board' }, [0, 1, 2, 3, 4].map(i => {
+      if (s.board[i]) {
+        const mode = sd ? (sd.cards.has(cardKey(s.board[i])) ? 'win' : 'dim') : null;
+        return cardEl(s.board[i], `${s.handNumber}:b${i}`, mode);
+      }
+      const rc = rabbit && rabbit[i - s.board.length];
+      return rc ? cardEl(rc, `${s.handNumber}:r${i}`, 'ghost') : h('div', { class: 'slot' });
+    })));
+
+    if (s.phase === 'runout') {
+      center.push(h('div', { class: 'msg allin' }, h('div', { text: 'All in' })));
+    }
     if (over) {
       const msg = h('div', { class: 'msg' }, resultLines(s).map(l => h('div', { text: l })));
+      if (rabbit) {
+        const by = (s.players.find(p => p.id === s.result.rabbit.by) || {}).name;
+        msg.append(h('div', { class: 'sub', text: `${by} looked ahead. Faded cards would have come.` }));
+      }
       if (s.phase === 'handover') {
         msg.append(s.waitingForPlayers
           ? h('div', { class: 'sub', text: 'Waiting for players to sit back in.' })
@@ -372,19 +598,67 @@
     $('#center').replaceChildren(...center);
   }
 
+  // ---------- emoji ----------
+
+  function buildEmojiPanel() {
+    $('#emoji-panel').replaceChildren(...EMOJIS.map(e =>
+      h('button', { class: 'emoji', type: 'button', role: 'menuitem', 'aria-label': 'Send ' + e, text: e, onclick: () => {
+        post('emoji', { emoji: e }, true);
+        closeEmojis();
+      } })));
+  }
+  function closeEmojis() { $('#emoji-panel').hidden = true; $('#emoji-btn').setAttribute('aria-expanded', 'false'); }
+  $('#emoji-btn').addEventListener('click', e => {
+    e.stopPropagation();
+    const p = $('#emoji-panel');
+    if (!p.children.length) buildEmojiPanel();
+    p.hidden = !p.hidden;
+    $('#emoji-btn').setAttribute('aria-expanded', String(!p.hidden));
+  });
+
+  function onEmoji({ id, emoji }) {
+    const pos = ui.seatPos[id];
+    if (!pos || $('#game').hidden) return;
+    Sound.emoji();
+    const pop = h('div', { class: 'pop', style: `left:${pos.x}%;top:${pos.y - (landscape.matches ? 7 : 6)}%`, text: emoji });
+    $('#pops').append(pop);
+    setTimeout(() => pop.remove(), 2800);
+  }
+
   // ---------- action bar ----------
 
   function renderActions(s) {
     const me = s.players.find(p => p.id === s.you);
-    const key = JSON.stringify([s.handNumber, s.phase, s.toAct, s.currentBet, s.legal, me.stack, me.bet,
-      me.sittingOut, me.folded, me.busted, me.allIn, s.waitingForPlayers, s.pot, s.blinds]);
+    const key = JSON.stringify([s.handNumber, s.phase, s.paused, s.toAct, s.currentBet, s.legal, me.stack, me.bet,
+      me.sittingOut, me.folded, me.inHand, me.busted, me.allIn, me.shown, s.waitingForPlayers, s.pot, s.blinds,
+      s.timeBank, s.preAction, !!(s.result && s.result.rabbit), s.hostId === s.you]);
     if (key === ui.footerKey) return;
     ui.footerKey = key;
     $('#actions').replaceChildren(h('div', { class: 'actions-inner' }, buildActions(s, me)));
   }
 
+  function showOptions(s, me) {
+    const over = s.phase === 'handover' || s.phase === 'finished';
+    if (!over || !s.result) return null;
+    const buttons = [];
+    const mine = me.hole && me.hole.length === 2 ? me.hole : null;
+    const autoShown = s.result.type === 'showdown' && !me.folded;
+    if (mine && me.inHand && !autoShown && !(me.shown[0] && me.shown[1])) {
+      const label = c => `Show ${RANK_LABEL[c.r] || c.r}${SUITS[c.s]}`;
+      if (!me.shown[0]) buttons.push(h('button', { class: 'btn small', text: label(mine[0]), onclick: () => post('show', { which: 'left' }) }));
+      if (!me.shown[1]) buttons.push(h('button', { class: 'btn small', text: label(mine[1]), onclick: () => post('show', { which: 'right' }) }));
+      if (!me.shown[0] && !me.shown[1]) buttons.push(h('button', { class: 'btn small', text: 'Show both', onclick: () => post('show', { which: 'both' }) }));
+    }
+    if (s.result.type === 'fold' && !s.result.rabbit && s.board.length < 5) {
+      buttons.push(h('button', { class: 'btn small rabbit', title: 'See the cards that would have come',
+        text: 'Rabbit hunt', onclick: () => post('rabbit') }));
+    }
+    return buttons.length ? h('div', { class: 'show-row' }, buttons) : null;
+  }
+
   function buildActions(s, me) {
     const status = (...kids) => h('div', { class: 'status' }, kids);
+    if (s.paused) return status(h('span', { text: 'The game is paused.' }));
     if (s.phase === 'finished') return status(h('span', { text: 'The game is over.' }));
     if (me.busted) return status(h('span', { text: `You are out. You finished ${ordinal(me.place)}.` }));
     if (me.sittingOut) {
@@ -393,27 +667,35 @@
     }
     if (s.legal) return myTurn(s, me);
 
-    let text;
+    const stepAway = h('button', { class: 'link', text: 'Step away', onclick: () => {
+      if (confirm('Step away? You fold this hand and sit out until you come back.')) post('leave');
+    } });
+    if (s.phase === 'runout') return status(h('span', { text: 'All in. Dealing the cards…' }));
     if (s.phase === 'handover') {
-      text = s.waitingForPlayers ? 'Waiting for players to sit back in.' : ['Next hand in ', h('span', { class: 'js-next-secs' }), 's'];
-    } else if (me.folded) {
-      text = 'You folded. Waiting for the hand to finish.';
-    } else {
-      const actor = s.players.find(p => p.id === s.toAct);
-      text = actor ? ['Waiting for ', actor.name, ' ', h('span', { class: 'js-turn-secs' })] : 'Waiting…';
+      const text = s.waitingForPlayers ? 'Waiting for players to sit back in.' : ['Next hand in ', h('span', { class: 'js-next-secs' }), 's'];
+      return [status(h('span', {}, text), stepAway), showOptions(s, me)];
     }
-    return status(
-      h('span', {}, text),
-      h('button', { class: 'link', text: 'Step away', onclick: () => {
-        if (confirm('Step away? You fold this hand and sit out until you come back.')) post('leave');
-      } }));
+    if (!me.inHand) return status(h('span', { text: 'You are dealt in from the next hand.' }), stepAway);
+    if (me.folded) return status(h('span', { text: 'You folded. Waiting for the hand to finish.' }), stepAway);
+
+    const actor = s.players.find(p => p.id === s.toAct);
+    const pre = h('button', { class: 'btn small toggle', 'aria-pressed': String(s.preAction),
+      title: 'Check if it is free, otherwise fold, as soon as it is your turn',
+      text: s.preAction ? 'Check / fold: on' : 'Check / fold', onclick: () => post('preaction', { on: !s.preAction }) });
+    return [
+      status(h('span', {}, actor ? ['Waiting for ', actor.name, ' ', h('span', { class: 'js-turn-secs' })] : 'Waiting…'), stepAway),
+      pre,
+    ];
   }
 
   function myTurn(s, me) {
     const L = s.legal;
     const min = L.minRaiseTo;
     const max = L.maxRaiseTo;
-    const out = [h('div', { class: 'status turn' }, h('b', { text: 'Your turn' }), h('span', { class: 'js-turn-secs' }))];
+    const bank = s.timeBank > 0
+      ? h('button', { class: 'btn small bank', title: 'Add thinking time', text: `+${s.settings.turnSeconds}s (${s.timeBank})`, onclick: () => post('timebank') })
+      : null;
+    const out = [h('div', { class: 'status turn' }, h('b', { text: 'Your turn' }), h('span', { class: 'js-turn-secs' }), bank)];
 
     const foldBtn = h('button', { class: 'btn fold', text: 'Fold', onclick: () => {
       if (L.canCheck && !confirm('You can check for free. Fold anyway?')) return;
@@ -464,19 +746,106 @@
     return out;
   }
 
-  // ---------- game over ----------
+  // ---------- paused ----------
 
-  function renderOver(s) {
-    if (ui.overShown) return;
-    ui.overShown = true;
-    const standings = [...s.players].sort((a, b) => (a.place || 99) - (b.place || 99));
-    const champ = standings[0];
-    $('#over').replaceChildren(
+  function renderPaused(s) {
+    const o = $('#paused');
+    const key = JSON.stringify([s.paused, s.hostId === s.you]);
+    if (key === ui.pausedKey) return;
+    ui.pausedKey = key;
+    if (!s.paused) { o.hidden = true; return; }
+    o.replaceChildren(
       h('div', { class: 'plaque wood' },
         h('div', { class: 'felt-card' },
+          h('h2', { text: 'Game paused' }),
+          h('p', { class: 'lede', text: s.hostId === s.you ? 'The turn timer and the blinds clock are stopped.' : 'The host paused the game. The turn timer and the blinds clock are stopped.' }),
+          s.hostId === s.you ? h('button', { class: 'btn primary', text: 'Resume game', onclick: () => post('resume') }) : null)));
+    o.hidden = false;
+  }
+
+  // ---------- hand history ----------
+
+  function miniCards(cards) {
+    return h('span', { class: 'mini-cards' }, (cards || []).map(c => cardEl(c, null, 'mini')));
+  }
+
+  function openHistory() {
+    ui.historyOpen = true;
+    $('#history').hidden = false;
+    loadHistory();
+  }
+  function closeHistory() { ui.historyOpen = false; $('#history').hidden = true; }
+
+  async function loadHistory() {
+    if (!session) return;
+    let hands;
+    try {
+      const res = await fetch(`/api/rooms/${session.code}/history?token=${encodeURIComponent(session.token)}`);
+      hands = (await res.json()).hands || [];
+    } catch (e) { toast('Could not load the hand history.'); return; }
+    ui.historyCount = hands.length;
+
+    const rows = hands.map(x => {
+      const win = x.winners.map(w => {
+        const hand = w.handName ? ` with ${HAND_PHRASE[w.handName] || w.handName}` : '';
+        const cards = x.revealed[w.id];
+        return h('div', { class: 'hh-win' },
+          h('b', { text: w.name }), ` ${x.winners.length > 1 ? 'split' : 'won'} ${fmt(w.amount)}${hand}`,
+          cards ? miniCards(cards) : null);
+      });
+      return h('li', { class: 'hh' },
+        h('div', { class: 'hh-top' },
+          h('b', { text: `Hand ${x.n}` }),
+          h('span', { text: `Blinds ${fmt(x.blinds[0])}/${fmt(x.blinds[1])}` }),
+          h('span', { class: 'hh-pot', text: `Pot ${fmt(x.pot)}` })),
+        x.board.length ? h('div', { class: 'hh-board' }, miniCards(x.board)) : null,
+        win,
+        h('div', { class: 'hh-you' },
+          x.yourHole
+            ? ['Your cards', miniCards(x.yourHole), h('span', { class: 'net ' + (x.yourNet > 0 ? 'up' : x.yourNet < 0 ? 'down' : ''), text: signed(x.yourNet) })]
+            : 'You were not dealt in'));
+    });
+
+    $('#history').replaceChildren(
+      h('div', { class: 'sheet wood', role: 'dialog', 'aria-label': 'Hand history' },
+        h('div', { class: 'sheet-head' },
+          h('h2', { text: 'Hand history' }),
+          h('button', { class: 'btn small', text: 'Close', onclick: closeHistory })),
+        rows.length
+          ? h('ol', { class: 'hh-list' }, rows)
+          : h('p', { class: 'wait', text: 'No hands played yet.' })));
+  }
+
+  // ---------- end of the tournament ----------
+
+  function renderOver(s) {
+    if (ui.overShown || !s.recap) return;
+    ui.overShown = true;
+    const r = s.recap;
+    const champ = r.standings[0];
+    const stat = (title, body) => h('div', { class: 'stat' }, h('div', { class: 'stat-title', text: title }), h('div', { class: 'stat-body' }, body));
+    const stats = [];
+    if (r.biggestPot) {
+      const who = r.biggestPot.names.join(' and ');
+      stats.push(stat('Biggest pot', [h('b', { text: fmt(r.biggestPot.amount) }), ` won by ${who}` + (r.biggestPot.handName ? ` with ${HAND_PHRASE[r.biggestPot.handName] || r.biggestPot.handName}` : '') + ` in hand ${r.biggestPot.hand}`]));
+    }
+    if (r.bestHand) {
+      stats.push(stat('Best hand', [h('b', { text: r.bestHand.name }), ` with ${HAND_PHRASE[r.bestHand.handName] || r.bestHand.handName}`, miniCards(r.bestHand.cards)]));
+    }
+    if (r.mostWins) stats.push(stat('Most hands won', [h('b', { text: r.mostWins.name }), `, ${r.mostWins.count}`]));
+    if (r.mostKnockouts) stats.push(stat('Most knock-outs', [h('b', { text: r.mostKnockouts.name }), `, ${r.mostKnockouts.count}`]));
+    stats.push(stat('The game', `${r.hands} ${r.hands === 1 ? "hand" : "hands"}` + (r.durationMs ? ` in ${duration(r.durationMs)}` : '')));
+
+    $('#over').replaceChildren(
+      h('div', { class: 'plaque wood recap' },
+        h('div', { class: 'felt-card' },
           h('h2', { text: champ.id === s.you ? 'You win the tournament' : `${champ.name} wins the tournament` }),
-          h('ol', { class: 'standings' }, standings.map(p =>
-            h('li', {}, h('span', { text: `${ordinal(p.place || 1)} ${p.name}` }), h('span', { text: p.place === 1 ? fmt(p.stack) + ' chips' : '' })))),
+          h('ol', { class: 'standings' }, r.standings.map(p =>
+            h('li', {},
+              h('span', {}, h('b', { text: ordinal(p.place || 1) }), ' ', p.name,
+                p.knockedBy ? h('small', { text: ` knocked out by ${p.knockedBy}` }) : null),
+              h('span', { text: p.place === 1 ? fmt(p.stack) + ' chips' : '' })))),
+          h('div', { class: 'stats' }, stats),
           h('button', { class: 'btn primary', text: 'Back to start', onclick: () => forget() }))));
     $('#over').hidden = false;
   }
@@ -484,17 +853,26 @@
   // ---------- countdowns ----------
 
   function tick() {
-    if (!state) return;
+    if (!state || state.phase === 'lobby') return;
     const now = Date.now() + skew;
+    const paused = state.paused;
     const lt = document.querySelector('.js-level-time');
-    if (lt && state.nextLevelAt) lt.textContent = mmss(state.nextLevelAt - now);
-    const secs = state.turnDeadline ? Math.max(0, Math.ceil((state.turnDeadline - now) / 1000)) : null;
+    if (lt && state.nextLevelAt) lt.textContent = mmss(paused ? state.levelRemainingMs : state.nextLevelAt - now);
+
+    let secs = null;
+    if (paused && state.turnRemainingMs != null) secs = Math.ceil(state.turnRemainingMs / 1000);
+    else if (state.turnDeadline) secs = Math.max(0, Math.ceil((state.turnDeadline - now) / 1000));
     document.querySelectorAll('.js-turn-secs').forEach(e => { e.textContent = secs == null ? '' : secs + 's'; });
+    if (state.toAct === state.you && secs != null && secs <= 5 && secs > 0 && secs !== ui.lastSecs && !paused) Sound.tick();
+    ui.lastSecs = secs;
+
     document.querySelectorAll('.js-next-secs').forEach(e => {
-      e.textContent = state.nextHandAt ? Math.max(0, Math.ceil((state.nextHandAt - now) / 1000)) : '';
+      const ms = paused ? state.nextHandRemainingMs : state.nextHandAt ? state.nextHandAt - now : null;
+      e.textContent = ms == null ? '' : Math.max(0, Math.ceil(ms / 1000));
     });
     if (state.turnDeadline) {
-      const pct = clamp(((state.turnDeadline - now) / state.turnMs) * 100, 0, 100);
+      const span = state.turnSpanMs || state.turnMs;
+      const pct = clamp(((state.turnDeadline - now) / span) * 100, 0, 100);
       document.querySelectorAll('.timer i').forEach(i => { i.style.width = pct + '%'; });
     }
   }
@@ -502,6 +880,10 @@
   landscape.addEventListener('change', () => { if (state && state.phase !== 'lobby') renderTable(state); });
 
   // ---------- start ----------
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* not available, that is fine */ }); });
+  }
 
   const saved = store.get('poker.session');
   const hashCode = location.hash.replace('#', '').toUpperCase().slice(0, 4);

@@ -122,4 +122,60 @@ test('random 5-card hand frequencies match real poker odds', () => {
   assert.ok(Math.abs(pct(5) - 0.197) < 0.15, 'flush ' + pct(5).toFixed(3));
 });
 
+// ---------- win percentages ----------
+
+const eq = (a, b, board) => E.equity(
+  [{ id: 'a', hole: E.parseCards(a) }, { id: 'b', hole: E.parseCards(b) }],
+  board ? E.parseCards(board) : []);
+
+test('equity: aces against kings before the flop is about 82%', () => {
+  const r = eq('Ah Ad', 'Kh Kd');
+  assert.ok(Math.abs(r.a + r.b - 100) < 1e-9);
+  assert.ok(r.a > 79 && r.a < 85, 'got ' + r.a);
+});
+
+test('equity: a finished board gives 100% to the winner and splits ties', () => {
+  const win = eq('Ah Ad', 'Kh Kd', '2c 7d 9s Jc 3h');
+  assert.strictEqual(win.a, 100);
+  assert.strictEqual(win.b, 0);
+  const tie = E.equity(
+    [{ id: 'a', hole: E.parseCards('2c 3d') }, { id: 'b', hole: E.parseCards('2h 3s') }],
+    E.parseCards('As Ks Qs Js Ts'));
+  assert.strictEqual(tie.a, 50);
+});
+
+test('equity: on the flop aces still beat kings about 91% of the time (exact count)', () => {
+  const r = eq('Ah Ad', 'Kh Kd', '2c 7d 9s');
+  assert.ok(Math.abs(r.a + r.b - 100) < 1e-9);
+  assert.ok(r.a > 88 && r.a < 94, 'got ' + r.a);
+});
+
+test('equity: turn spot is exact (outs / unseen cards)', () => {
+  // Board As 7s 2d Kc, a: Qs Js (flush draw, 9 outs, plus runner pair outs are not enough) vs b: Ah Ad (set of aces)
+  // Only the river is left: a wins with any of the 8 remaining spades that do not pair the board for b... count by brute force instead
+  const a = E.parseCards('Qs Js'); const b = E.parseCards('Ah Ad');
+  const board = E.parseCards('As 7s 2d Kc');
+  const used = new Set([...a, ...b, ...board].map(E.cardToString));
+  let aWins = 0; let total = 0;
+  for (const c of E.newDeck()) {
+    if (used.has(E.cardToString(c))) continue;
+    total++;
+    const sa = E.bestHand([...a, ...board, c]).score;
+    const sb = E.bestHand([...b, ...board, c]).score;
+    if (sa > sb) aWins++; else if (sa === sb) aWins += 0.5;
+  }
+  const r = E.equity([{ id: 'a', hole: a }, { id: 'b', hole: b }], board);
+  assert.ok(Math.abs(r.a - (aWins / total) * 100) < 1e-9, `${r.a} vs ${(aWins / total) * 100}`);
+});
+
+test('equity: ten players all-in before the flop is fast and adds up to 100', () => {
+  const deck = E.shuffle(E.newDeck());
+  const entries = Array.from({ length: 10 }, (_, i) => ({ id: 'p' + i, hole: [deck[i * 2], deck[i * 2 + 1]] }));
+  const t0 = Date.now();
+  const r = E.equity(entries, []);
+  const ms = Date.now() - t0;
+  assert.ok(Math.abs(Object.values(r).reduce((s, v) => s + v, 0) - 100) < 1e-6);
+  assert.ok(ms < 1500, 'took ' + ms + 'ms');
+});
+
 console.log('\n' + passed + ' passed' + (process.exitCode ? ', some FAILED' : ''));
