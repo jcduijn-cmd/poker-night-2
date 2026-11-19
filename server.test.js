@@ -347,6 +347,29 @@ test('pause: host only, blocks play, freezes the turn clock, resume continues wi
   });
 });
 
+test('blind schedule: everyone sees it, only the host can edit, jump or reset', async () => {
+  await withServer({ turnMs: 5000, handPauseMs: 5000 }, async (port, open) => {
+    const { code, players } = await setup(port, ['Jan', 'Piet']);
+    const host = players[0], other = players[1];
+    const s = open(code, other.token);
+    const first = await s.waitFor(x => x.schedule && x.schedule.length >= 12);
+    assert.strictEqual(first.schedule[0].sb, 25);
+    assert.strictEqual((await post(port, code, 'blinds', other.token, { level: 2, sb: 10, bb: 20 })).status, 403);
+    assert.strictEqual((await post(port, code, 'blinds', host.token, { level: 2, sb: 70, bb: 140 })).status, 200);
+    const edited = await s.waitFor(x => x.schedule[1].edited);
+    assert.deepStrictEqual([edited.schedule[1].sb, edited.schedule[1].bb], [70, 140]);
+    assert.strictEqual((await post(port, code, 'blinds', host.token, { level: 2, sb: 70, bb: 10 })).status, 400);
+    assert.strictEqual((await post(port, code, 'jumplevel', host.token, { level: 3 })).status, 400); // not started
+    await post(port, code, 'start', host.token);
+    await s.waitFor(x => x.phase === 'preflop');
+    assert.strictEqual((await post(port, code, 'jumplevel', other.token, { level: 3 })).status, 403);
+    assert.strictEqual((await post(port, code, 'jumplevel', host.token, { level: 3 })).status, 200);
+    await s.waitFor(x => x.clockLevel === 3);
+    assert.strictEqual((await post(port, code, 'resetblinds', host.token, {})).status, 200);
+    await s.waitFor(x => !x.schedule[1].edited);
+  });
+});
+
 test('time bank: adds a turn on your own turn, counts down, runs out', async () => {
   await withServer({ settings: { timeBank: 1 }, turnMs: 2000, handPauseMs: 5000 }, async (port, open) => {
     const { code, players } = await setup(port, ['Jan', 'Piet']);

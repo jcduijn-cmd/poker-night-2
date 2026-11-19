@@ -70,7 +70,7 @@
   const ui = {
     footerKey: '', rendered: new Set(), stagger: 0, handNumber: 0, wasMyTurn: false, overShown: false,
     busy: false, lobbyKey: '', seatPos: {}, studsKey: '', historyOpen: false, historyCount: -1,
-    lastSecs: null, installEvent: null, pausedKey: '',
+    lastSecs: null, installEvent: null, pausedKey: '', blindsOpen: false, blindsKey: '', blindsEdit: null,
   };
 
   // ---------- small helpers ----------
@@ -92,6 +92,7 @@
       for (const id of ['#over', '#paused', '#history', '#help', '#menu']) $(id).hidden = true;
       ui.overShown = false;
       ui.historyOpen = false;
+      if (name === 'home') { $('#blinds').hidden = true; ui.blindsOpen = false; ui.blindsEdit = null; ui.blindsKey = ''; }
       Sound.heartbeat(false);
     }
   }
@@ -265,7 +266,7 @@
     ui.wasMyTurn = myTurn;
     document.title = myTurn ? 'Your turn: Poker night' : 'Poker night';
 
-    if (s.phase === 'lobby') { showScreen('lobby'); renderLobby(s); return; }
+    if (s.phase === 'lobby') { showScreen('lobby'); renderLobby(s); renderBlinds(s); return; }
     soundsFor(before, s);
     showScreen('game');
     if (before && before.phase === 'lobby' && s.seatsDrawn) toast('Seats were drawn at random');
@@ -274,6 +275,7 @@
     renderTable(s);
     renderActions(s);
     renderPaused(s);
+    renderBlinds(s);
     if (s.phase === 'finished') renderOver(s);
     if (ui.historyOpen && s.historyCount !== ui.historyCount) loadHistory();
     tick();
@@ -355,6 +357,7 @@
           h('h2', { text: 'Your table code' }),
           h('div', { class: 'code', text: s.code }),
           h('button', { class: 'btn', onclick: invite, text: 'Share invite link' }),
+          h('button', { class: 'btn', onclick: openBlinds, text: 'Blind schedule' }),
           h('ul', { class: 'roster' }, s.players.map(p =>
             h('li', { class: p.connected ? 'on' : 'off' },
               h('span', { class: 'dot' }),
@@ -403,6 +406,65 @@
   }
   function closeHelp() { $('#help').hidden = true; }
 
+  // ---------- blind schedule ----------
+
+  function openBlinds() { ui.blindsOpen = true; ui.blindsEdit = null; ui.blindsKey = ''; renderBlinds(state); }
+  function closeBlinds() { ui.blindsOpen = false; ui.blindsEdit = null; $('#blinds').hidden = true; }
+
+  function renderBlinds(s) {
+    const box = $('#blinds');
+    if (!ui.blindsOpen || !s) { box.hidden = true; return; }
+    const isHost = s.hostId === s.you;
+    const key = JSON.stringify([s.schedule, s.clockLevel, s.level, s.levelMinutes, s.phase, isHost, ui.blindsEdit]);
+    if (key === ui.blindsKey) { box.hidden = false; return; }
+    ui.blindsKey = key;
+    const started = s.phase !== 'lobby';
+    const over = s.phase === 'finished';
+    const rows = s.schedule.map(r => {
+      const past = started && r.level < s.clockLevel;
+      const now = started && r.level === s.clockLevel;
+      const editing = ui.blindsEdit === r.level;
+      if (editing) {
+        const sb = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: r.sb, 'aria-label': 'Small blind' });
+        const bb = h('input', { type: 'number', inputmode: 'numeric', min: 1, value: r.bb, 'aria-label': 'Big blind' });
+        return h('li', { class: 'bl-row editing' },
+          h('span', { class: 'bl-lv', text: r.level }),
+          h('span', { class: 'bl-edit' }, sb, ' / ', bb),
+          h('span', { class: 'bl-btns' },
+            h('button', { class: 'btn small primary', text: 'Save', onclick: async () => {
+              await post('blinds', { level: r.level, sb: Number(sb.value), bb: Number(bb.value) });
+              ui.blindsEdit = null; ui.blindsKey = ''; renderBlinds(state);
+            } }),
+            h('button', { class: 'btn small', text: 'Cancel', onclick: () => { ui.blindsEdit = null; ui.blindsKey = ''; renderBlinds(state); } })));
+      }
+      const hostBtns = isHost && !over && !past ? [
+        h('button', { class: 'btn small', text: 'Edit', onclick: () => { ui.blindsEdit = r.level; ui.blindsKey = ''; renderBlinds(state); } }),
+        started && !now ? h('button', { class: 'btn small', text: 'Play now', onclick: () => {
+          if (confirm(`Start level ${r.level} now (${fmt(r.sb)} / ${fmt(r.bb)})? It applies from the next hand and the level timer starts again.`)) post('jumplevel', { level: r.level });
+        } }) : null,
+        r.edited ? h('button', { class: 'btn small', text: 'Reset', onclick: () => post('resetblinds', { level: r.level }) }) : null,
+      ] : [];
+      return h('li', { class: 'bl-row' + (past ? ' past' : '') + (now ? ' now' : '') },
+        h('span', { class: 'bl-lv', text: r.level }),
+        h('span', { class: 'bl-val' }, h('b', { text: `${fmt(r.sb)} / ${fmt(r.bb)}` }),
+          r.ante ? h('small', { text: ` ante ${fmt(r.ante)}` }) : null,
+          r.edited ? h('small', { class: 'bl-tag', text: ' edited' }) : null,
+          now ? h('small', { class: 'bl-tag', text: ' now' }) : null),
+        h('span', { class: 'bl-btns' }, hostBtns));
+    });
+    box.replaceChildren(
+      h('div', { class: 'sheet wood', role: 'dialog', 'aria-label': 'Blind schedule' },
+        h('div', { class: 'sheet-head' },
+          h('h2', { text: 'Blind schedule' }),
+          h('button', { class: 'btn small', text: 'Close', onclick: closeBlinds })),
+        h('p', { class: 'hint', text: `Blinds go up every ${s.levelMinutes} minutes, and the new blinds apply from the next hand.`
+          + (isHost ? ' As host you can change a level, or start one now.' : '') }),
+        h('ol', { class: 'bl-list' }, rows),
+        isHost && !over && s.schedule.some(r => r.edited)
+          ? h('button', { class: 'btn small', text: 'Reset all to standard', onclick: () => post('resetblinds', {}) }) : null));
+    box.hidden = false;
+  }
+
   // ---------- top bar and menu ----------
 
   function renderTopbar(s) {
@@ -411,7 +473,7 @@
     $('#topbar').replaceChildren(
       h('button', { class: 'tb', onclick: invite, title: 'Share invite link' },
         h('span', { class: 'tb-label', text: 'Table' }), h('b', { text: s.code })),
-      h('div', { class: 'tb' },
+      h('button', { class: 'tb', onclick: openBlinds, title: 'See the blind schedule' },
         h('span', { class: 'tb-label', text: `Blinds, level ${s.level}` }),
         h('b', { text: `${fmt(sb)} / ${fmt(bb)}` }),
         s.ante ? h('span', { class: 'tb-label', text: `Ante ${fmt(s.ante)}` }) : null),
@@ -427,6 +489,7 @@
     if (!m.hidden) { m.hidden = true; return; }
     const s = state;
     const items = [
+      ['Blind schedule', openBlinds],
       ['Hand history', openHistory],
       [`Sound: ${Sound.isEnabled() ? 'on' : 'off'}`, () => { Sound.setEnabled(!Sound.isEnabled()); Sound.chip(); }],
       ['Share invite link', invite],
@@ -449,6 +512,7 @@
     $('#menu').hidden = true;
     closeEmojis();
     if (ui.historyOpen) closeHistory();
+    if (ui.blindsOpen) closeBlinds();
     closeHelp();
   });
 
@@ -693,10 +757,12 @@
     const me = s.players.find(p => p.id === s.you);
     const key = JSON.stringify([s.handNumber, s.phase, s.paused, s.toAct, s.currentBet, s.legal, me.stack, me.bet,
       me.sittingOut, me.folded, me.inHand, me.busted, me.allIn, me.shown, s.waitingForPlayers, s.pot, s.blinds,
-      s.timeBank, s.preAction, !!(s.result && s.result.rabbit), s.hostId === s.you]);
+      s.timeBank, s.preAction, !!(s.result && s.result.rabbit), s.hostId === s.you, s.myHand && s.myHand.text]);
     if (key === ui.footerKey) return;
     ui.footerKey = key;
-    $('#actions').replaceChildren(h('div', { class: 'actions-inner' }, buildActions(s, me)));
+    const hint = s.myHand && !s.paused && s.phase !== 'finished'
+      ? h('div', { class: 'hand-hint', text: 'You have: ' + s.myHand.text }) : null;
+    $('#actions').replaceChildren(h('div', { class: 'actions-inner' }, hint, buildActions(s, me)));
   }
 
   function showOptions(s, me) {
@@ -722,7 +788,7 @@
     const status = (...kids) => h('div', { class: 'status' }, kids);
     if (s.paused) return status(h('span', { text: 'The game is paused.' }));
     if (s.phase === 'finished') return status(h('span', { text: 'The game is over.' }));
-    if (me.busted) return status(h('span', { text: `You are out. You finished ${ordinal(me.place)}.` }));
+    if (me.busted) return status(h('span', { text: `You are out, you finished ${ordinal(me.place)}. You can keep watching the table.` }));
     if (me.sittingOut) {
       return [status(h('span', { text: 'You are sitting out.' })),
         h('button', { class: 'btn primary', text: 'Sit back in', onclick: () => post('sitin') })];
@@ -880,6 +946,29 @@
 
   // ---------- end of the tournament ----------
 
+  // The recap as plain text, for a mail the player sends from his own email app.
+  function recapText(s) {
+    const r = s.recap;
+    const L = [`Poker night, table ${s.code}`, `${r.hands} hands` + (r.durationMs ? ` in ${duration(r.durationMs)}` : ''), '', 'Final standings'];
+    for (const p of r.standings) L.push(`${ordinal(p.place || 1)}  ${p.name}` + (p.knockedBy ? ` (knocked out by ${p.knockedBy})` : ''));
+    L.push('', 'Highlights');
+    if (r.biggestPot) L.push(`Biggest pot: ${fmt(r.biggestPot.amount)} won by ${r.biggestPot.names.join(' and ')} (hand ${r.biggestPot.hand})`);
+    if (r.bestHand) L.push(`Best hand: ${r.bestHand.name}`);
+    if (r.mostWins) L.push(`Most hands won: ${r.mostWins.name}, ${r.mostWins.count}`);
+    if (r.mostKnockouts) L.push(`Most knock-outs: ${r.mostKnockouts.name}, ${r.mostKnockouts.count}`);
+    const aw = r.awards || {};
+    if (aw.peakStack) L.push(`Biggest stack ever: ${aw.peakStack.name}, ${fmt(aw.peakStack.count)}`);
+    if (aw.mostRaises) L.push(`Most aggressive: ${aw.mostRaises.name}, ${aw.mostRaises.count} bets and raises`);
+    if (aw.mostAllIns) L.push(`Most all-ins: ${aw.mostAllIns.name}, ${aw.mostAllIns.count}`);
+    L.push('', 'Per player (hands, won, raises, all-ins, peak stack)');
+    for (const p of r.rows || []) L.push(`${p.name}: ${p.hands}, ${p.won}, ${p.raises}, ${p.allIns}, ${fmt(p.peak)}`);
+    return L.join('\n');
+  }
+  function emailStats(s) {
+    const url = 'mailto:?subject=' + encodeURIComponent('Poker night statistics') + '&body=' + encodeURIComponent(recapText(s));
+    location.href = url;
+  }
+
   function renderOver(s) {
     if (ui.overShown || !s.recap) return;
     ui.overShown = true;
@@ -896,6 +985,12 @@
     }
     if (r.mostWins) stats.push(stat('Most hands won', [h('b', { text: r.mostWins.name }), `, ${r.mostWins.count}`]));
     if (r.mostKnockouts) stats.push(stat('Most knock-outs', [h('b', { text: r.mostKnockouts.name }), `, ${r.mostKnockouts.count}`]));
+    const aw = r.awards || {};
+    if (aw.peakStack) stats.push(stat('Biggest stack ever', [h('b', { text: aw.peakStack.name }), `, ${fmt(aw.peakStack.count)} chips`]));
+    if (aw.mostRaises) stats.push(stat('Most aggressive', [h('b', { text: aw.mostRaises.name }), `, ${aw.mostRaises.count} bets and raises`]));
+    if (aw.mostAllIns) stats.push(stat('Most all-ins', [h('b', { text: aw.mostAllIns.name }), `, ${aw.mostAllIns.count}`]));
+    if (aw.mostFolds) stats.push(stat('Folded the most', [h('b', { text: aw.mostFolds.name }), `, ${aw.mostFolds.count} times`]));
+    if (aw.mostShowdownWins) stats.push(stat('Most showdowns won', [h('b', { text: aw.mostShowdownWins.name }), `, ${aw.mostShowdownWins.count}`]));
     stats.push(stat('The game', `${r.hands} ${r.hands === 1 ? "hand" : "hands"}` + (r.durationMs ? ` in ${duration(r.durationMs)}` : '')));
 
     $('#over').replaceChildren(
@@ -908,6 +1003,12 @@
                 p.knockedBy ? h('small', { text: ` knocked out by ${p.knockedBy}` }) : null),
               h('span', { text: p.place === 1 ? fmt(p.stack) + ' chips' : '' })))),
           h('div', { class: 'stats' }, stats),
+          h('div', { class: 'recap-scroll' }, h('table', { class: 'recap-table' },
+            h('tr', {}, ['Player', 'Hands', 'Won', 'Win %', 'Raises', 'All-ins', 'Peak'].map(t => h('th', { text: t }))),
+            (r.rows || []).map(p => h('tr', {}, [p.name, p.hands, p.won, p.winPct + '%', p.raises, p.allIns, fmt(p.peak)].map(t => h('td', { text: String(t) })))))),
+          h('div', { class: 'btn-col' },
+            h('button', { class: 'btn', text: 'Send the statistics by email', onclick: () => emailStats(s) }),
+            h('p', { class: 'hint', text: 'Opens your email app with the text filled in. You choose who gets it.' })),
           h('button', { class: 'btn primary', text: 'Back to start', onclick: () => forget() }))));
     $('#over').hidden = false;
   }

@@ -186,6 +186,30 @@ class Room {
     this.afterChange(); // timers restart with the time that was left
   }
 
+  // Host: set the blinds of one level (level is 1-based, as shown on screen).
+  setBlinds(id, level, sb, bb) {
+    this.requireHost(id);
+    this.wrap(() => this.game.setLevelBlinds(Number(level) - 1, Number(sb), Number(bb)));
+    this.touch();
+    this.broadcast();
+  }
+
+  // Host: back to the standard blinds, for one level or all of them.
+  resetBlinds(id, level) {
+    this.requireHost(id);
+    this.wrap(() => this.game.resetBlinds(level === undefined || level === null ? undefined : Number(level) - 1));
+    this.touch();
+    this.broadcast();
+  }
+
+  // Host: start a level right now; the level timer begins again. Works while paused too.
+  jumpLevel(id, level) {
+    this.requireHost(id);
+    this.wrap(() => this.game.jumpToLevel(Number(level) - 1));
+    this.touch();
+    this.broadcast();
+  }
+
   // ---------- commands from players ----------
 
   action(id, action, amount) {

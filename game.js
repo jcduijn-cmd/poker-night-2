@@ -40,6 +40,38 @@ function anteForLevel(level, factor, fromLevel) {
   return nice(blindsForLevel(level, factor)[1] / 10);
 }
 
+const RANK_WORD = { 2: 'twos', 3: 'threes', 4: 'fours', 5: 'fives', 6: 'sixes', 7: 'sevens', 8: 'eights', 9: 'nines', 10: 'tens', 11: 'jacks', 12: 'queens', 13: 'kings', 14: 'aces' };
+const RANK_ONE = { 2: 'two', 3: 'three', 4: 'four', 5: 'five', 6: 'six', 7: 'seven', 8: 'eight', 9: 'nine', 10: 'ten', 11: 'jack', 12: 'queen', 13: 'king', 14: 'ace' };
+
+// What a player holds right now, in words: "High card: ace", "Pair of kings", "Flush" ...
+// Works with only 2-4 cards too (before the flop and on the flop), where bestHand needs five.
+function describeHand(cards) {
+  if (!cards || cards.length < 2) return null;
+  if (cards.length >= 5) {
+    const b = E.bestHand(cards);
+    const top = [...new Set(cards.map(c => c.r))].sort((x, y) => y - x);
+    const counts = new Map();
+    for (const c of cards) counts.set(c.r, (counts.get(c.r) || 0) + 1);
+    const by = n => [...counts.entries()].filter(e => e[1] === n).map(e => e[0]).sort((x, y) => y - x);
+    switch (b.name) {
+      case 'High Card': return { name: b.name, text: 'High card: ' + RANK_ONE[top[0]] };
+      case 'Pair': return { name: b.name, text: 'Pair of ' + RANK_WORD[by(2)[0]] };
+      case 'Two Pair': { const p = by(2); return { name: b.name, text: `Two pair: ${RANK_WORD[p[0]]} and ${RANK_WORD[p[1]]}` }; }
+      case 'Three of a Kind': return { name: b.name, text: 'Three ' + RANK_WORD[by(3)[0]] };
+      case 'Four of a Kind': return { name: b.name, text: 'Four ' + RANK_WORD[by(4)[0]] };
+      default: return { name: b.name, text: b.name };
+    }
+  }
+  const counts = new Map();
+  for (const c of cards) counts.set(c.r, (counts.get(c.r) || 0) + 1);
+  const g = [...counts.entries()].sort((x, y) => y[1] - x[1] || y[0] - x[0]);
+  if (g[0][1] === 4) return { name: 'Four of a Kind', text: 'Four ' + RANK_WORD[g[0][0]] };
+  if (g[0][1] === 3) return { name: 'Three of a Kind', text: 'Three ' + RANK_WORD[g[0][0]] };
+  if (g[0][1] === 2 && g[1] && g[1][1] === 2) return { name: 'Two Pair', text: `Two pair: ${RANK_WORD[g[0][0]]} and ${RANK_WORD[g[1][0]]}` };
+  if (g[0][1] === 2) return { name: 'Pair', text: 'Pair of ' + RANK_WORD[g[0][0]] };
+  return { name: 'High Card', text: 'High card: ' + RANK_ONE[g[0][0]] };
+}
+
 class Game {
   constructor(opts = {}) {
     this.deckFn = opts.deckFn || (() => E.shuffle(E.newDeck())); // test hook: LAST card is dealt first
@@ -49,6 +81,8 @@ class Game {
     this.configure(opts);
 
     this.clockStart = null;
+    this.overrides = this.overrides || new Map(); // level -> [sb, bb] set by the host
+    this.curBlinds = null;                         // blinds frozen for the hand in progress
     this.paused = false;
     this.pausedAt = null;
     this.endedAt = null;
@@ -67,13 +101,15 @@ class Game {
     this.equity = null;
     this.seatsDrawn = false;
     this.history = [];
-    this.stats = { handsWon: {}, biggestPot: null, best: null, eliminations: [] };
+    this.stats = { handsWon: {}, biggestPot: null, best: null, eliminations: [], players: {} };
   }
 
   // Settings can change until the first hand is dealt.
   configure(opts = {}) {
     if (this.started) throw new Error('The game has already started');
+    const prevStack = this.startingStack;
     if (opts.startingStack !== undefined || this.startingStack === undefined) this.startingStack = opts.startingStack || this.startingStack || STARTING_STACK;
+    if (this.overrides && prevStack !== undefined && prevStack !== this.startingStack) this.overrides.clear(); // edited blinds were for the old stack
     if (opts.levelMinutes !== undefined || this.levelMs === undefined) this.levelMs = (opts.levelMinutes || (this.levelMs ? this.levelMs / 60000 : LEVEL_MINUTES)) * 60000;
     if (opts.anteFromLevel !== undefined) this.anteFromLevel = opts.anteFromLevel;
     if (opts.lateRegLevel !== undefined) this.lateRegLevel = opts.lateRegLevel;
@@ -81,6 +117,13 @@ class Game {
     this.lateRegLevel = this.lateRegLevel || 0;
     this.factor = this.startingStack / BASE_STACK;
     for (const p of this.players) { p.stack = this.startingStack; p.startStack = this.startingStack; }
+  }
+
+  // Per-player counters for the end-of-game statistics.
+  pstat(id) {
+    const m = this.stats.players;
+    if (!m[id]) m[id] = { hands: 0, folds: 0, raises: 0, allIns: 0, showdowns: 0, showdownWins: 0, peak: 0, vpip: 0 };
+    return m[id];
   }
 
   // ---------- seating ----------
@@ -165,7 +208,40 @@ class Game {
   // ---------- blinds clock ----------
 
   updateLevel(now) { this.level = this.levelAt(now); }
-  blinds() { return blindsForLevel(this.level, this.factor); }
+
+  // The blinds of a level: the host's own numbers if he changed it, else the standard schedule.
+  blindsAt(level) {
+    const o = this.overrides.get(level);
+    return o ? o.slice() : blindsForLevel(level, this.factor).slice();
+  }
+  anteAt(level) {
+    if (!this.anteFromLevel || level + 1 < this.anteFromLevel) return 0;
+    return nice(this.blindsAt(level)[1] / 10);
+  }
+  // Blinds of the hand in progress stay fixed, so edits never change a hand halfway.
+  blinds() { return this.curBlinds || this.blindsAt(this.level); }
+
+  // Host: set the blinds of a level that has not started yet (counting from the running level).
+  setLevelBlinds(level, sb, bb, now = Date.now()) {
+    if (this.phase === 'finished') throw new Error('The game is over');
+    if (!Number.isInteger(level) || level < 0 || level > 59) throw new Error('Unknown level');
+    if (this.started && level < this.levelAt(now)) throw new Error('That level is already behind us');
+    if (!Number.isInteger(sb) || !Number.isInteger(bb) || sb < 1 || bb < sb || bb > 100000000) throw new Error('Enter a small blind and a bigger big blind');
+    this.overrides.set(level, [sb, bb]);
+  }
+  // Host: back to the standard blinds for one level, or for all of them.
+  resetBlinds(level) {
+    if (level === undefined || level === null) this.overrides.clear();
+    else this.overrides.delete(level);
+  }
+  // Host: start a level now (up or down). The level timer starts again from zero.
+  jumpToLevel(level, now = Date.now()) {
+    if (!this.started) throw new Error('The game has not started yet');
+    if (this.phase === 'finished') throw new Error('The game is over');
+    if (!Number.isInteger(level) || level < 0 || level > 59) throw new Error('Unknown level');
+    const t = this.paused ? this.pausedAt : now;
+    this.clockStart = t - level * this.levelMs;
+  }
 
   // ---------- helpers ----------
 
@@ -200,6 +276,7 @@ class Game {
 
     if (!this.started) { this.started = true; this.clockStart = now; }
     this.updateLevel(now);
+    this.curBlinds = this.blindsAt(this.level);
     this.handNumber++;
     this.board = [];
     this.deck = this.deckFn();
@@ -217,10 +294,11 @@ class Game {
       p.inHand = p.stack > 0 && !p.sittingOut;
       p.folded = !p.inHand;
       p.startStack = p.stack;
+      if (p.inHand) { const ps = this.pstat(p.id); ps.hands++; ps.peak = Math.max(ps.peak, p.stack); }
     }
 
     // Antes: dead money in the pot before the blinds.
-    this.currentAnte = anteForLevel(this.level, this.factor, this.anteFromLevel);
+    this.currentAnte = this.anteAt(this.level);
     if (this.currentAnte > 0) {
       for (const p of this.players) {
         if (!p.inHand) continue;
@@ -283,6 +361,11 @@ class Game {
     const p = this.players[idx];
     if (!p || p.id !== id) throw new Error('Not your turn');
     const toCall = this.currentBet - p.bet;
+    const ps = this.pstat(p.id);
+    if (action === 'fold') ps.folds++;
+    else if (action === 'raise') ps.raises++;
+    else if (action === 'allin') { ps.allIns++; if (p.stack > toCall) ps.raises++; }
+    else if (action === 'call' && p.stack <= toCall) ps.allIns++;
 
     switch (action) {
       case 'fold':
@@ -525,6 +608,14 @@ class Game {
     });
     if (this.history.length > HISTORY_LIMIT) this.history.shift();
 
+    if (r.type === 'showdown') {
+      for (const hnd of r.hands) {
+        const ps = this.pstat(hnd.id);
+        ps.showdowns++;
+        if (r.winnings[hnd.id] > 0) ps.showdownWins++;
+      }
+    }
+    for (const p of this.players) if (p.inHand) { const ps = this.pstat(p.id); ps.peak = Math.max(ps.peak, p.stack); }
     for (const w of winners) this.stats.handsWon[w.id] = (this.stats.handsWon[w.id] || 0) + 1;
     if (!this.stats.biggestPot || pot > this.stats.biggestPot.amount) {
       const top = winners.slice().sort((a, b) => b.amount - a.amount)[0];
@@ -600,7 +691,28 @@ class Game {
     const kos = {};
     for (const e of this.stats.eliminations) if (e.by) kos[e.by] = (kos[e.by] || 0) + 1;
     const best = this.stats.best;
+    const rows = this.players.map(p => {
+      const ps = this.pstat(p.id);
+      const won = this.stats.handsWon[p.id] || 0;
+      return {
+        id: p.id, name: p.name, hands: ps.hands, won, winPct: ps.hands ? Math.round(100 * won / ps.hands) : 0,
+        folds: ps.folds, raises: ps.raises, allIns: ps.allIns, showdowns: ps.showdowns, showdownWins: ps.showdownWins,
+        peak: Math.max(ps.peak, p.stack), knockouts: kos[p.id] || 0,
+      };
+    });
+    const pick = (key, min = 1) => {
+      const r = rows.slice().sort((a, b) => b[key] - a[key])[0];
+      return r && r[key] >= min ? { name: r.name, count: r[key] } : null;
+    };
     return {
+      rows,
+      awards: {
+        peakStack: pick('peak'),
+        mostRaises: pick('raises'),
+        mostAllIns: pick('allIns'),
+        mostFolds: pick('folds'),
+        mostShowdownWins: pick('showdownWins'),
+      },
       hands: this.handNumber,
       durationMs: this.endedAt && this.clockStart ? this.endedAt - this.clockStart : null,
       standings,
@@ -613,6 +725,13 @@ class Game {
 
   // ---------- what a player's browser gets to see ----------
 
+  // Only the owner gets this: what his own cards plus the board make right now.
+  myHandHint(forId) {
+    const p = this.players.find(x => x.id === forId);
+    if (!p || p.folded || p.hole.length < 2 || !(this.isHandActive() || this.phase === 'runout' || this.phase === 'handover')) return null;
+    return describeHand([...p.hole, ...this.board]);
+  }
+
   getState(forId, now = Date.now()) {
     const showCards = this.result && this.result.type === 'showdown';
     const t = this.paused ? this.pausedAt : now;
@@ -623,14 +742,23 @@ class Game {
       const lv = Math.max(0, Math.floor((t - this.clockStart) / this.levelMs));
       nextLevelAt = this.clockStart + (lv + 1) * this.levelMs;
       levelRemainingMs = nextLevelAt - t;
-      nextBlinds = blindsForLevel(lv + 1, this.factor);
+      nextBlinds = this.blindsAt(lv + 1);
+    }
+    const clockLevel = this.clockStart !== null ? Math.max(0, Math.floor((t - this.clockStart) / this.levelMs)) : 0;
+    const schedule = [];
+    for (let l = 0; l < Math.max(BLIND_LEVELS.length, clockLevel + 6); l++) {
+      const [sb, bb] = this.blindsAt(l);
+      schedule.push({ level: l + 1, sb, bb, ante: this.anteAt(l), edited: this.overrides.has(l) });
     }
     return {
+      schedule,
+      clockLevel: clockLevel + 1,
+      levelMinutes: this.levelMs / 60000,
       phase: this.phase,
       paused: this.paused,
       handNumber: this.handNumber,
       level: this.level + 1,
-      blinds: this.started ? this.blinds() : blindsForLevel(0, this.factor),
+      blinds: this.started ? this.blinds() : this.blindsAt(0),
       ante: this.currentAnte,
       nextBlinds,
       nextLevelAt,
@@ -644,6 +772,7 @@ class Game {
       equity: this.phase === 'runout' ? this.equity : null,
       result: this.result,
       winner: this.winner,
+      myHand: this.myHandHint(forId),
       lateRegOpen: this.started && this.canJoin(now),
       seatsDrawn: this.seatsDrawn,
       recap: this.phase === 'finished' ? this.recap() : null,
@@ -667,5 +796,5 @@ class Game {
 }
 
 module.exports = {
-  Game, BLIND_LEVELS, blindsForLevel, anteForLevel, STARTING_STACK, LEVEL_MINUTES, MAX_PLAYERS, BASE_STACK,
+  Game, describeHand, BLIND_LEVELS, blindsForLevel, anteForLevel, STARTING_STACK, LEVEL_MINUTES, MAX_PLAYERS, BASE_STACK,
 };

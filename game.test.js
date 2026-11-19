@@ -660,4 +660,77 @@ test('recap: standings with who knocked out whom, biggest pot, best hand, most w
   assert.strictEqual(r.hands, 1);
 });
 
+test('blinds: host edits an upcoming level, it applies from the next hand and the ante follows', () => {
+  const g = mk(['A', 'B'], { anteFromLevel: 1 });
+  g.setLevelBlinds(1, 100, 250, 0);
+  assert.deepStrictEqual(g.blindsAt(1), [100, 250]);
+  assert.strictEqual(g.anteAt(1), 25);
+  g.startHand(0);
+  assert.deepStrictEqual(g.blinds(), [25, 50]);
+  g.setLevelBlinds(0, 30, 60, 0);            // editing mid-hand does not change this hand
+  assert.deepStrictEqual(g.blinds(), [25, 50]);
+  const sch = g.getState('A', 0).schedule;
+  assert.deepStrictEqual([sch[1].sb, sch[1].bb, sch[1].edited], [100, 250, true]);
+  assert.strictEqual(g.getState('A', 0).nextBlinds[1], 250);
+  assert.throws(() => g.setLevelBlinds(1, 100, 50, 0), /bigger big blind/);
+  g.resetBlinds(1);
+  assert.deepStrictEqual(g.blindsAt(1), [50, 100]);
+});
+
+test('blinds: cannot edit a level that is already over; starting stack change clears edits', () => {
+  const g = mk(['A', 'B']);
+  g.setLevelBlinds(2, 80, 160, 0);
+  g.configure({ startingStack: 5000 });
+  assert.deepStrictEqual(g.blindsAt(2), blindsForLevel(2, 0.4));
+  g.startHand(0);
+  const lvl = 15 * 60000;
+  assert.throws(() => g.setLevelBlinds(0, 10, 20, lvl + 1), /already behind/);
+});
+
+test('blinds: jump to a level restarts the level timer and works while paused', () => {
+  const g = mk(['A', 'B']);
+  assert.throws(() => g.jumpToLevel(3, 0), /not started/);
+  g.startHand(0);
+  g.jumpToLevel(4, 1000);
+  assert.strictEqual(g.levelAt(1000), 4);
+  assert.strictEqual(g.getState('A', 1000).levelRemainingMs, 15 * 60000);
+  g.pause(5000);
+  g.jumpToLevel(2, 99999);
+  assert.strictEqual(g.levelAt(99999), 2);
+  g.resume(100000);
+  assert.strictEqual(g.levelAt(100000), 2);
+});
+
+test('hand hint: names the hand with 2 to 7 cards, only for the owner', () => {
+  const { describeHand } = require('./game');
+  const d = s => describeHand(E.parseCards(s)).text;
+  assert.strictEqual(d('As Kd'), 'High card: ace');
+  assert.strictEqual(d('Ks Kd'), 'Pair of kings');
+  assert.strictEqual(d('Ks Kd 2h 2c'), 'Two pair: kings and twos');
+  assert.strictEqual(d('Ks Kd Kh 2c'), 'Three kings');
+  assert.strictEqual(d('2s 3s 4s 5s 6s Kd'), 'Straight Flush');
+  const g = mk(['A', 'B']);
+  rig(g, 0, { 0: 'Ah Ad', 1: '7c 2d' }, '3c 8d 9h Js Kc');
+  g.startHand(0);
+  assert.strictEqual(g.getState('A').myHand.text, 'Pair of aces');
+  assert.strictEqual(g.getState('B').myHand.text, 'High card: seven');
+  assert.ok(!JSON.stringify(g.getState('A').players).includes('Pair of'));
+});
+
+test('statistics: per-player counters and awards in the recap', () => {
+  const g = mk(['A', 'B', 'C']);
+  rig(g, 0, { 0: 'Ah Ad', 1: 'Kh Kd', 2: 'Qh Qd' }, '2c 7d 9h Js 3c');
+  g.startHand(0);
+  g.act('A', 'allin'); g.act('B', 'call'); g.act('C', 'call');
+  settle(g);
+  const r = g.getState('A').recap;
+  const a = r.rows.find(x => x.id === 'A');
+  assert.strictEqual(a.hands, 1);
+  assert.strictEqual(a.won, 1);
+  assert.strictEqual(a.allIns, 1);
+  assert.strictEqual(a.knockouts, 2);
+  assert.strictEqual(a.peak, 37500);
+  assert.deepStrictEqual(r.awards.mostAllIns.count, 1);
+});
+
 console.log('\n' + passed + ' passed' + (process.exitCode ? ', some FAILED' : ''));

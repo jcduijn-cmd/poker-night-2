@@ -12,6 +12,9 @@
 //   POST /api/rooms/:code/settings   {token, settings}      host: change the rules (lobby only)
 //   POST /api/rooms/:code/pause      {token}                host: pause / resume (blinds clock stops too)
 //   POST /api/rooms/:code/resume     {token}
+//   POST /api/rooms/:code/blinds     {token, level, sb, bb} host: set the blinds of a level
+//   POST /api/rooms/:code/resetblinds {token, level?}       host: standard blinds again (one level or all)
+//   POST /api/rooms/:code/jumplevel  {token, level}         host: start that level now
 //   POST /api/rooms/:code/show       {token, which}         after a hand: left | right | both
 //   POST /api/rooms/:code/rabbit     {token}                after a fold-out: reveal the next cards
 //   POST /api/rooms/:code/timebank   {token}                +1 turn of thinking time
@@ -126,7 +129,7 @@ function createApp(opts = {}) {
         return sendJson(res, 200, { code: room.code, playerId: me.id, token: me.token, rejoined: false });
       }
 
-      const m = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{4})\/(join|events|history|start|action|leave|sitin|settings|show|rabbit|pause|resume|timebank|emoji|preaction)$/);
+      const m = pathname.match(/^\/api\/rooms\/([A-Za-z0-9]{4})\/(join|events|history|start|action|leave|sitin|settings|show|rabbit|pause|resume|blinds|resetblinds|jumplevel|timebank|emoji|preaction)$/);
       if (!m) throw new RoomError('Not found', 404);
       const room = rooms.get(m[1].toUpperCase());
       if (!room) throw new RoomError('Table not found. Check the code.', 404);
@@ -157,6 +160,9 @@ function createApp(opts = {}) {
       else if (what === 'rabbit') room.rabbit(id);
       else if (what === 'pause') room.pause(id);
       else if (what === 'resume') room.resume(id);
+      else if (what === 'blinds') room.setBlinds(id, body.level, body.sb, body.bb);
+      else if (what === 'resetblinds') room.resetBlinds(id, body.level);
+      else if (what === 'jumplevel') room.jumpLevel(id, body.level);
       else if (what === 'timebank') room.useTimeBank(id);
       else if (what === 'emoji') room.emoji(id, String(body.emoji));
       else if (what === 'preaction') room.setPreAction(id, body.on === true);

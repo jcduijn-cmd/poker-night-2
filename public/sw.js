@@ -2,7 +2,7 @@
 // Makes Poker night installable. It always asks the network first, so a new version
 // of the game shows up straight away, and falls back to the saved copy of the page
 // when the connection is bad. Live table traffic (/api/) never goes through here.
-const CACHE = 'poker-night-v2';
+const CACHE = 'poker-night-v3';
 const SHELL = ['/', 'style.css', 'app.js', 'sounds.js', 'manifest.webmanifest', 'icon-192.png'];
 
 self.addEventListener('install', event => {
