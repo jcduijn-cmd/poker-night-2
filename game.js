@@ -59,6 +59,16 @@ function describeHand(cards) {
       case 'Two Pair': { const p = by(2); return { name: b.name, text: `Two pair: ${RANK_WORD[p[0]]} and ${RANK_WORD[p[1]]}` }; }
       case 'Three of a Kind': return { name: b.name, text: 'Three ' + RANK_WORD[by(3)[0]] };
       case 'Four of a Kind': return { name: b.name, text: 'Four ' + RANK_WORD[by(4)[0]] };
+      case 'Full House': { const f = new Map(); for (const c of b.cards) f.set(c.r, (f.get(c.r) || 0) + 1);
+        const t3 = [...f].find(e => e[1] === 3)[0], p2 = [...f].find(e => e[1] === 2)[0];
+        return { name: b.name, text: `Full house: ${RANK_WORD[t3]} full of ${RANK_WORD[p2]}` }; }
+      case 'Flush': return { name: b.name, text: `Flush, ${RANK_ONE[Math.max(...b.cards.map(c => c.r))]} high` };
+      case 'Straight': case 'Straight Flush': {
+        const rs = b.cards.map(c => c.r);
+        const hi = rs.includes(14) && rs.includes(2) ? 5 : Math.max(...rs);
+        if (b.name === 'Straight Flush' && hi === 14) return { name: b.name, text: 'Royal flush' };
+        return { name: b.name, text: `${b.name}, ${RANK_ONE[hi]} high` };
+      }
       default: return { name: b.name, text: b.name };
     }
   }
@@ -569,14 +579,14 @@ class Game {
     for (const p of live) {
       const best = info[p.id];
       if (!this.stats.best || best.score > this.stats.best.score) {
-        this.stats.best = { score: best.score, playerId: p.id, name: p.name, handName: best.name, cards: best.cards, hand: this.handNumber };
+        this.stats.best = { score: best.score, playerId: p.id, name: p.name, handName: best.name, handText: describeHand([...p.hole, ...this.board]).text, cards: best.cards, hand: this.handNumber };
       }
     }
 
     this.result = {
       type: 'showdown',
       board: this.board.slice(),
-      hands: live.map(p => ({ id: p.id, hole: p.hole, name: info[p.id].name, best: info[p.id].cards })),
+      hands: live.map(p => ({ id: p.id, hole: p.hole, name: info[p.id].name, text: describeHand([...p.hole, ...this.board]).text, best: info[p.id].cards })),
       pots: potResults,
       winnings,
       contested,
@@ -599,6 +609,7 @@ class Game {
     const winners = Object.entries(r.contested).map(([id, amount]) => ({
       id, name: nameOf(id), amount,
       handName: r.type === 'showdown' ? ((r.hands.find(h => h.id === id) || {}).name || null) : null,
+      handText: r.type === 'showdown' ? ((r.hands.find(h => h.id === id) || {}).text || null) : null,
     }));
     const pot = this.totalPot();
     this.history.push({
@@ -619,7 +630,7 @@ class Game {
     for (const w of winners) this.stats.handsWon[w.id] = (this.stats.handsWon[w.id] || 0) + 1;
     if (!this.stats.biggestPot || pot > this.stats.biggestPot.amount) {
       const top = winners.slice().sort((a, b) => b.amount - a.amount)[0];
-      this.stats.biggestPot = { amount: pot, hand: this.handNumber, names: winners.map(w => w.name), handName: top ? top.handName : null };
+      this.stats.biggestPot = { amount: pot, hand: this.handNumber, names: winners.map(w => w.name), handName: top ? top.handName : null, handText: top ? top.handText : null };
     }
 
     for (const p of this.players) p.bet = 0;
@@ -707,7 +718,6 @@ class Game {
     return {
       rows,
       awards: {
-        peakStack: pick('peak'),
         mostRaises: pick('raises'),
         mostAllIns: pick('allIns'),
         mostFolds: pick('folds'),
@@ -717,7 +727,7 @@ class Game {
       durationMs: this.endedAt && this.clockStart ? this.endedAt - this.clockStart : null,
       standings,
       biggestPot: this.stats.biggestPot,
-      bestHand: best ? { name: best.name, handName: best.handName, cards: best.cards, hand: best.hand } : null,
+      bestHand: best ? { name: best.name, handName: best.handName, handText: best.handText, cards: best.cards, hand: best.hand } : null,
       mostWins: top(this.stats.handsWon),
       mostKnockouts: top(kos),
     };

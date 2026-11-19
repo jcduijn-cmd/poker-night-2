@@ -655,6 +655,7 @@ test('recap: standings with who knocked out whom, biggest pot, best hand, most w
   assert.ok(r.standings.slice(1).every(s => s.knockedBy === 'Player A'));
   assert.strictEqual(r.biggestPot.amount, 37500);
   assert.strictEqual(r.bestHand.handName, 'Pair');
+  assert.match(r.bestHand.handText, /^Pair of /);
   assert.deepStrictEqual(r.mostWins, { name: 'Player A', count: 1 });
   assert.deepStrictEqual(r.mostKnockouts, { name: 'Player A', count: 2 });
   assert.strictEqual(r.hands, 1);
@@ -708,7 +709,9 @@ test('hand hint: names the hand with 2 to 7 cards, only for the owner', () => {
   assert.strictEqual(d('Ks Kd'), 'Pair of kings');
   assert.strictEqual(d('Ks Kd 2h 2c'), 'Two pair: kings and twos');
   assert.strictEqual(d('Ks Kd Kh 2c'), 'Three kings');
-  assert.strictEqual(d('2s 3s 4s 5s 6s Kd'), 'Straight Flush');
+  assert.strictEqual(d('2s 3s 4s 5s 6s Kd'), 'Straight Flush, six high');
+  assert.strictEqual(d('As Ks Qs Js Ts 2d'), 'Royal flush');
+  assert.strictEqual(d('Ks Kd Kh 2c 2d 9h 4s'), 'Full house: kings full of twos');
   const g = mk(['A', 'B']);
   rig(g, 0, { 0: 'Ah Ad', 1: '7c 2d' }, '3c 8d 9h Js Kc');
   g.startHand(0);

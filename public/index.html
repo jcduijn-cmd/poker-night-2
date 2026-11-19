@@ -3,12 +3,13 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#1c0f08">
+  <meta name="theme-color" content="#f3e6c8">
+  <script>try { var t = localStorage.getItem('poker.theme'); document.documentElement.dataset.theme = t === 'dark' ? 'dark' : 'light'; } catch (e) { document.documentElement.dataset.theme = 'light'; }</script>
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-title" content="Poker night">
+  <meta name="apple-mobile-web-app-title" content="Dawgs Poker Club">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <title>Poker night</title>
+  <title>Dawgs Poker Club</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
   <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -24,7 +25,8 @@
   <main id="home" class="screen" hidden>
     <div class="plaque wood">
       <div class="felt-card">
-        <h1>Poker night</h1>
+        <img class="brand-logo" src="logo.png" alt="" width="132" height="125">
+        <h1><span class="h1-a">Dawgs</span> <span class="h1-b">Poker Club</span></h1>
         <p class="lede">A Texas Hold'em tournament for you and your friends. Chips only, no real money.</p>
         <form id="home-form" autocomplete="off">
           <label>Your name
@@ -41,7 +43,8 @@
           <div class="btn-col">
             <button type="submit" id="join-btn" class="btn primary" disabled>Join table</button>
             <button type="button" id="create-btn" class="btn" disabled>Create a new table</button>
-            <button type="button" id="install-link" class="link" hidden>Put Poker night on your home screen</button>
+            <button type="button" id="theme-link" class="link"></button>
+            <button type="button" id="install-link" class="link" hidden>Put Dawgs Poker Club on your home screen</button>
           </div>
         </form>
       </div>
@@ -56,7 +59,7 @@
       <div class="table wood" id="table">
         <div class="rail"></div>
         <div class="studs" id="studs"></div>
-        <div class="felt"><span class="felt-mark">Poker night</span></div>
+        <div class="felt"><span class="felt-mark">Dawgs Poker Club</span></div>
         <div class="center" id="center"></div>
         <div id="seats"></div>
         <div class="pops" id="pops"></div>
@@ -73,6 +76,8 @@
   <div id="blinds" class="overlay sheet-wrap" hidden></div>
   <div id="paused" class="overlay" hidden></div>
   <div id="over" class="overlay" hidden></div>
+
+  <div id="print-sheet" aria-hidden="true"></div>
 
   <script src="sounds.js"></script>
   <script src="app.js"></script>

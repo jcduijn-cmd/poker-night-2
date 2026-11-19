@@ -1,5 +1,5 @@
 'use strict';
-// Poker night: browser side. Talks to the server over fetch (actions) and
+// Dawgs Poker Club: browser side. Talks to the server over fetch (actions) and
 // EventSource (live table updates). No libraries.
 (() => {
   const SUITS = { s: '♠', h: '♥', d: '♦', c: '♣' };
@@ -17,6 +17,18 @@
   ];
 
   const $ = sel => document.querySelector(sel);
+
+  // Two looks: light (default) and dark. Everyone picks their own; it is remembered on this device.
+  function currentTheme() { return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'; }
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = t;
+    try { localStorage.setItem('poker.theme', t); } catch (e) { /* private mode */ }
+    const meta = document.querySelector('meta[name=theme-color]');
+    if (meta) meta.content = t === 'dark' ? '#3a1c0d' : '#f3e6c8';
+    const link = document.getElementById('theme-link');
+    if (link) link.textContent = t === 'dark' ? 'Switch to the light look' : 'Switch to the dark look';
+  }
+  function toggleTheme() { applyTheme(currentTheme() === 'dark' ? 'light' : 'dark'); }
   const landscape = window.matchMedia('(orientation: landscape)'); // same query the CSS uses for the wide table
   const fmt = n => Number(n).toLocaleString('en-US');
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
@@ -120,7 +132,7 @@
   async function invite() {
     const url = `${location.origin}/#${session.code}`;
     try {
-      if (navigator.share) { await navigator.share({ title: 'Poker night', text: 'Join my poker table', url }); return; }
+      if (navigator.share) { await navigator.share({ title: 'Dawgs Poker Club', text: 'Join my poker table', url }); return; }
     } catch (e) { return; /* share sheet dismissed */ }
     try { await navigator.clipboard.writeText(url); toast('Invite link copied'); }
     catch (e) { toast('Share this code: ' + session.code); }
@@ -167,7 +179,7 @@
     ui.lobbyKey = ui.footerKey = '';
     history.replaceState(null, '', location.pathname);
     $('#banner').hidden = true;
-    document.title = 'Poker night';
+    document.title = 'Dawgs Poker Club';
     showScreen('home');
     initHome();
     if (message) toast(message);
@@ -264,7 +276,7 @@
     const touched = !navigator.userActivation || navigator.userActivation.hasBeenActive;
     if (myTurn && !ui.wasMyTurn && navigator.vibrate && touched) navigator.vibrate(150);
     ui.wasMyTurn = myTurn;
-    document.title = myTurn ? 'Your turn: Poker night' : 'Poker night';
+    document.title = myTurn ? 'Your turn: Dawgs Poker Club' : 'Dawgs Poker Club';
 
     if (s.phase === 'lobby') { showScreen('lobby'); renderLobby(s); renderBlinds(s); return; }
     soundsFor(before, s);
@@ -383,7 +395,7 @@
     ['After a hand', 'Show one or both of your cards if you like. When everyone else folded you can rabbit hunt to see the cards that would have come.'],
     ['Emojis', 'The smiley button at the bottom left sends an emoji that pops up at your seat.'],
     ['Menu', 'The ... button at the top has the hand history, sound on or off, the invite link and, for the host, pause. The host can also change the rules in the lobby before the game starts.'],
-    ['Install', 'On a phone you can add Poker night to your home screen and open it like an app.'],
+    ['Install', 'On a phone you can add Dawgs Poker Club to your home screen and open it like an app.'],
   ];
 
   function helpList() {
@@ -489,6 +501,7 @@
     if (!m.hidden) { m.hidden = true; return; }
     const s = state;
     const items = [
+      [`Look: ${currentTheme() === 'dark' ? 'dark' : 'light'} (tap to switch)`, toggleTheme],
       ['Blind schedule', openBlinds],
       ['Hand history', openHistory],
       [`Sound: ${Sound.isEnabled() ? 'on' : 'off'}`, () => { Sound.setEnabled(!Sound.isEnabled()); Sound.chip(); }],
@@ -603,7 +616,7 @@
   function resultFor(s, id) {
     const r = s.result;
     if (!r || (s.phase !== 'handover' && s.phase !== 'finished')) return {};
-    const hand = r.type === 'showdown' ? (r.hands.find(x => x.id === id) || {}).name : null;
+    const hand = r.type === 'showdown' ? (r.hands.find(x => x.id === id) || {}).text : null;
     return { hand, win: r.winnings[id] };
   }
 
@@ -663,9 +676,10 @@
       const label = r.pots.length > 1 ? (i === 0 ? 'Main pot: ' : `Side pot ${i}: `) : '';
       if (pot.eligible.length === 1) return `${label}${name(pot.winners[0])} gets ${fmt(pot.amount)} back`;
       const who = pot.winners.map(name).join(' and ');
-      const handName = (r.hands.find(x => x.id === pot.winners[0]) || {}).name;
+      const hd = r.hands.find(x => x.id === pot.winners[0]) || {};
+      const handName = hd.name;
       const verb = pot.winners.length > 1 ? 'split' : 'wins';
-      return `${label}${who} ${verb} ${fmt(pot.amount)}` + (handName ? ` with ${HAND_PHRASE[handName] || handName}` : '');
+      return `${label}${who} ${verb} ${fmt(pot.amount)}` + (handName ? ` with ${hd.text || HAND_PHRASE[handName] || handName}` : '');
     });
   }
 
@@ -915,7 +929,7 @@
 
     const rows = hands.map(x => {
       const win = x.winners.map(w => {
-        const hand = w.handName ? ` with ${HAND_PHRASE[w.handName] || w.handName}` : '';
+        const hand = w.handName ? ` with ${w.handText || HAND_PHRASE[w.handName] || w.handName}` : '';
         const cards = x.revealed[w.id];
         return h('div', { class: 'hh-win' },
           h('b', { text: w.name }), ` ${x.winners.length > 1 ? 'split' : 'won'} ${fmt(w.amount)}${hand}`,
@@ -946,27 +960,38 @@
 
   // ---------- end of the tournament ----------
 
-  // The recap as plain text, for a mail the player sends from his own email app.
-  function recapText(s) {
+  // A4 page with the statistics. It is only visible when printing; "Save as PDF" in the print screen makes the file.
+  function printStats(s) {
     const r = s.recap;
-    const L = [`Poker night, table ${s.code}`, `${r.hands} hands` + (r.durationMs ? ` in ${duration(r.durationMs)}` : ''), '', 'Final standings'];
-    for (const p of r.standings) L.push(`${ordinal(p.place || 1)}  ${p.name}` + (p.knockedBy ? ` (knocked out by ${p.knockedBy})` : ''));
-    L.push('', 'Highlights');
-    if (r.biggestPot) L.push(`Biggest pot: ${fmt(r.biggestPot.amount)} won by ${r.biggestPot.names.join(' and ')} (hand ${r.biggestPot.hand})`);
-    if (r.bestHand) L.push(`Best hand: ${r.bestHand.name}`);
-    if (r.mostWins) L.push(`Most hands won: ${r.mostWins.name}, ${r.mostWins.count}`);
-    if (r.mostKnockouts) L.push(`Most knock-outs: ${r.mostKnockouts.name}, ${r.mostKnockouts.count}`);
     const aw = r.awards || {};
-    if (aw.peakStack) L.push(`Biggest stack ever: ${aw.peakStack.name}, ${fmt(aw.peakStack.count)}`);
-    if (aw.mostRaises) L.push(`Most aggressive: ${aw.mostRaises.name}, ${aw.mostRaises.count} bets and raises`);
-    if (aw.mostAllIns) L.push(`Most all-ins: ${aw.mostAllIns.name}, ${aw.mostAllIns.count}`);
-    L.push('', 'Per player (hands, won, raises, all-ins, peak stack)');
-    for (const p of r.rows || []) L.push(`${p.name}: ${p.hands}, ${p.won}, ${p.raises}, ${p.allIns}, ${fmt(p.peak)}`);
-    return L.join('\n');
-  }
-  function emailStats(s) {
-    const url = 'mailto:?subject=' + encodeURIComponent('Poker night statistics') + '&body=' + encodeURIComponent(recapText(s));
-    location.href = url;
+    const line = (t, v) => v ? h('tr', {}, h('th', { text: t }), h('td', { text: v })) : null;
+    const hp = r.biggestPot;
+    const sheet = h('div', { class: 'print-page' },
+      h('img', { src: 'logo.png', alt: '', class: 'pp-logo' }),
+      h('h1', { text: 'Dawgs Poker Club' }),
+      h('p', { class: 'pp-sub', text: `Table ${s.code} · ${new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })} · ${r.hands} ${r.hands === 1 ? 'hand' : 'hands'}` + (r.durationMs ? ` in ${duration(r.durationMs)}` : '') }),
+      h('h2', { text: 'Final standings' }),
+      h('ol', {}, r.standings.map(p => h('li', {}, `${p.name}` + (p.knockedBy ? ` (knocked out by ${p.knockedBy})` : ' (winner)')))),
+      h('h2', { text: 'Highlights' }),
+      h('table', { class: 'pp-table' },
+        line('Biggest pot', hp ? `${fmt(hp.amount)} won by ${hp.names.join(' and ')}` + (hp.handText ? ` with ${hp.handText}` : '') + `, hand ${hp.hand}` : null),
+        line('Best hand', r.bestHand ? (r.bestHand.handText || r.bestHand.name) : null),
+        line('Most hands won', r.mostWins ? `${r.mostWins.name}, ${r.mostWins.count}` : null),
+        line('Most knock-outs', r.mostKnockouts ? `${r.mostKnockouts.name}, ${r.mostKnockouts.count}` : null),
+        line('Most aggressive', aw.mostRaises ? `${aw.mostRaises.name}, ${aw.mostRaises.count} bets and raises` : null),
+        line('Most all-ins', aw.mostAllIns ? `${aw.mostAllIns.name}, ${aw.mostAllIns.count}` : null),
+        line('Folded the most', aw.mostFolds ? `${aw.mostFolds.name}, ${aw.mostFolds.count} times` : null),
+        line('Most showdowns won', aw.mostShowdownWins ? `${aw.mostShowdownWins.name}, ${aw.mostShowdownWins.count}` : null)),
+      h('h2', { text: 'Per player' }),
+      h('table', { class: 'pp-grid' },
+        h('tr', {}, ['Player', 'Hands', 'Won', 'Win %', 'Raises', 'All-ins', 'Showdowns won', 'Peak stack'].map(t => h('th', { text: t }))),
+        (r.rows || []).map(p => h('tr', {}, [p.name, p.hands, p.won, p.winPct + '%', p.raises, p.allIns, `${p.showdownWins}/${p.showdowns}`, fmt(p.peak)].map(t => h('td', { text: String(t) }))))));
+    const box = $('#print-sheet');
+    box.replaceChildren(sheet);
+    const prev = document.title;
+    document.title = `Dawgs Poker Club ${s.code} statistics`;
+    window.print();
+    setTimeout(() => { document.title = prev; }, 1000);
   }
 
   function renderOver(s) {
@@ -978,15 +1003,14 @@
     const stats = [];
     if (r.biggestPot) {
       const who = r.biggestPot.names.join(' and ');
-      stats.push(stat('Biggest pot', [h('b', { text: fmt(r.biggestPot.amount) }), ` won by ${who}` + (r.biggestPot.handName ? ` with ${HAND_PHRASE[r.biggestPot.handName] || r.biggestPot.handName}` : '') + ` in hand ${r.biggestPot.hand}`]));
+      stats.push(stat('Biggest pot', [h('b', { text: fmt(r.biggestPot.amount) }), ` won by ${who}` + (r.biggestPot.handName ? ` with ${r.biggestPot.handText || HAND_PHRASE[r.biggestPot.handName] || r.biggestPot.handName}` : '') + ` in hand ${r.biggestPot.hand}`]));
     }
     if (r.bestHand) {
-      stats.push(stat('Best hand', [h('b', { text: r.bestHand.name }), ` with ${HAND_PHRASE[r.bestHand.handName] || r.bestHand.handName}`, miniCards(r.bestHand.cards)]));
+      stats.push(stat('Best hand', [h('b', { text: r.bestHand.name }), ` with ${r.bestHand.handText || HAND_PHRASE[r.bestHand.handName] || r.bestHand.handName}`, miniCards(r.bestHand.cards)]));
     }
     if (r.mostWins) stats.push(stat('Most hands won', [h('b', { text: r.mostWins.name }), `, ${r.mostWins.count}`]));
     if (r.mostKnockouts) stats.push(stat('Most knock-outs', [h('b', { text: r.mostKnockouts.name }), `, ${r.mostKnockouts.count}`]));
     const aw = r.awards || {};
-    if (aw.peakStack) stats.push(stat('Biggest stack ever', [h('b', { text: aw.peakStack.name }), `, ${fmt(aw.peakStack.count)} chips`]));
     if (aw.mostRaises) stats.push(stat('Most aggressive', [h('b', { text: aw.mostRaises.name }), `, ${aw.mostRaises.count} bets and raises`]));
     if (aw.mostAllIns) stats.push(stat('Most all-ins', [h('b', { text: aw.mostAllIns.name }), `, ${aw.mostAllIns.count}`]));
     if (aw.mostFolds) stats.push(stat('Folded the most', [h('b', { text: aw.mostFolds.name }), `, ${aw.mostFolds.count} times`]));
@@ -1007,8 +1031,8 @@
             h('tr', {}, ['Player', 'Hands', 'Won', 'Win %', 'Raises', 'All-ins', 'Peak'].map(t => h('th', { text: t }))),
             (r.rows || []).map(p => h('tr', {}, [p.name, p.hands, p.won, p.winPct + '%', p.raises, p.allIns, fmt(p.peak)].map(t => h('td', { text: String(t) })))))),
           h('div', { class: 'btn-col' },
-            h('button', { class: 'btn', text: 'Send the statistics by email', onclick: () => emailStats(s) }),
-            h('p', { class: 'hint', text: 'Opens your email app with the text filled in. You choose who gets it.' })),
+            h('button', { class: 'btn', text: 'Save the statistics as PDF', onclick: () => printStats(s) }),
+            h('p', { class: 'hint', text: 'Opens the print screen. Choose "Save as PDF" to get an A4 page.' })),
           h('button', { class: 'btn primary', text: 'Back to start', onclick: () => forget() }))));
     $('#over').hidden = false;
   }
@@ -1043,6 +1067,9 @@
   landscape.addEventListener('change', () => { if (state && state.phase !== 'lobby') renderTable(state); });
 
   // ---------- start ----------
+
+  applyTheme(currentTheme());
+  $('#theme-link').addEventListener('click', toggleTheme);
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* not available, that is fine */ }); });

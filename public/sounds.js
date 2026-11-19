@@ -1,5 +1,5 @@
 'use strict';
-// Poker night sounds. Everything is synthesised with the Web Audio API,
+// Dawgs Poker Club sounds. Everything is synthesised with the Web Audio API,
 // so there are no audio files to download. Browsers only allow sound after
 // the first tap, which unlock() takes care of.
 window.Sound = (() => {
